@@ -14,6 +14,74 @@ use hbb_common::{bail, log, ResultType};
 generate_call_macro!(call_yuv, false);
 
 #[cfg(not(target_os = "ios"))]
+#[inline]
+unsafe fn copy_plane(
+    src: *const u8,
+    src_stride: usize,
+    dst: *mut u8,
+    dst_stride: usize,
+    row_bytes: usize,
+    rows: usize,
+) {
+    if rows == 0 || row_bytes == 0 {
+        return;
+    }
+    if src_stride == dst_stride && src_stride == row_bytes {
+        std::ptr::copy_nonoverlapping(src, dst, row_bytes * rows);
+    } else {
+        for r in 0..rows {
+            std::ptr::copy_nonoverlapping(
+                src.add(r * src_stride),
+                dst.add(r * dst_stride),
+                row_bytes,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn extract_nv12_planes<'a, 'b>(
+    captured: &'a PixelBuffer<'b>,
+    src: &'a [u8],
+    src_stride: &[usize],
+    src_width: usize,
+    src_height: usize,
+) -> ResultType<(&'a [u8], &'a [u8])> {
+    let uv_rows = (src_height + 1) / 2;
+    let uv_row_bytes = ((src_width + 1) / 2) * 2;
+    if src_stride.len() < 2 || src_stride[0] < src_width || src_stride[1] < uv_row_bytes {
+        bail!(
+            "invalid nv12 stride {:?} for {}x{}",
+            src_stride,
+            src_width,
+            src_height
+        );
+    }
+    let (src_y, src_uv) = if let Some(planes) = captured.nv12_planes() {
+        planes
+    } else {
+        let y_len = src_stride[0] * src_height;
+        if src.len() < y_len {
+            bail!("nv12 buffer too short for Y plane: {} < {}", src.len(), y_len);
+        }
+        (&src[..y_len], &src[y_len..])
+    };
+    if src_height > 0 {
+        let min_y = src_stride[0] * (src_height - 1) + src_width;
+        if src_y.len() < min_y {
+            bail!("nv12 Y plane too short: {} < {}", src_y.len(), min_y);
+        }
+    }
+    if uv_rows > 0 {
+        let min_uv = src_stride[1] * (uv_rows - 1) + uv_row_bytes;
+        if src_uv.len() < min_uv {
+            bail!("nv12 UV plane too short: {} < {}", src_uv.len(), min_uv);
+        }
+    }
+    Ok((src_y, src_uv))
+}
+
+#[cfg(not(target_os = "ios"))]
 pub fn convert_to_yuv(
     captured: &PixelBuffer,
     dst_fmt: EncodeYuvFormat,
@@ -60,6 +128,107 @@ pub fn convert_to_yuv(
     );
 
     match (src_pixfmt, dst_fmt.pixfmt) {
+        (crate::Pixfmt::NV12, crate::Pixfmt::NV12) => {
+            let (src_y, src_uv) =
+                extract_nv12_planes(captured, src, &src_stride, src_width, src_height)?;
+            let dst_stride_y = dst_fmt.stride[0];
+            let dst_stride_uv = dst_fmt.stride[1];
+            let uv_rows = (src_height + 1) / 2;
+            let uv_row_bytes = ((src_width + 1) / 2) * 2;
+            if dst_stride_y < src_width || dst_stride_uv < uv_row_bytes {
+                bail!(
+                    "dst nv12 stride too small: ({dst_stride_y}, {dst_stride_uv}) for {}x{}",
+                    src_width,
+                    src_height
+                );
+            }
+            let min_len = dst_fmt.u + dst_stride_uv * uv_rows;
+            let aligned_len = align(dst_fmt.h) * (align(dst_stride_y) + align(dst_stride_uv / 2));
+            dst.resize(aligned_len.max(min_len), 0);
+            unsafe {
+                let dst_y = dst.as_mut_ptr();
+                let dst_uv = dst.as_mut_ptr().add(dst_fmt.u);
+                copy_plane(
+                    src_y.as_ptr(),
+                    src_stride[0],
+                    dst_y,
+                    dst_stride_y,
+                    src_width,
+                    src_height,
+                );
+                copy_plane(
+                    src_uv.as_ptr(),
+                    src_stride[1],
+                    dst_uv,
+                    dst_stride_uv,
+                    uv_row_bytes,
+                    uv_rows,
+                );
+            }
+        }
+        (crate::Pixfmt::NV12, crate::Pixfmt::I420) => {
+            let (src_y, src_uv) =
+                extract_nv12_planes(captured, src, &src_stride, src_width, src_height)?;
+            let dst_stride_y = dst_fmt.stride[0];
+            let dst_stride_uv = dst_fmt.stride[1];
+            dst.resize(dst_fmt.h * dst_stride_y * 2, 0);
+            let dst_y = dst.as_mut_ptr();
+            let dst_u = dst[dst_fmt.u..].as_mut_ptr();
+            let dst_v = dst[dst_fmt.v..].as_mut_ptr();
+            call_yuv!(NV12ToI420(
+                src_y.as_ptr(),
+                src_stride[0] as _,
+                src_uv.as_ptr(),
+                src_stride[1] as _,
+                dst_y,
+                dst_stride_y as _,
+                dst_u,
+                dst_stride_uv as _,
+                dst_v,
+                dst_stride_uv as _,
+                src_width as _,
+                src_height as _,
+            ));
+        }
+        (crate::Pixfmt::NV12, crate::Pixfmt::I444) => {
+            let (src_y, src_uv) =
+                extract_nv12_planes(captured, src, &src_stride, src_width, src_height)?;
+            let dst_stride_y = dst_fmt.stride[0];
+            let dst_stride_u = dst_fmt.stride[1];
+            let dst_stride_v = dst_fmt.stride[2];
+            dst.resize(
+                align(dst_fmt.h)
+                    * (align(dst_stride_y) + align(dst_stride_u) + align(dst_stride_v)),
+                0,
+            );
+            let mid_stride = src_width * 4;
+            mid_data.resize(mid_stride * src_height, 0);
+            call_yuv!(NV12ToARGB(
+                src_y.as_ptr(),
+                src_stride[0] as _,
+                src_uv.as_ptr(),
+                src_stride[1] as _,
+                mid_data.as_mut_ptr(),
+                mid_stride as _,
+                src_width as _,
+                src_height as _,
+            ));
+            let dst_y = dst.as_mut_ptr();
+            let dst_u = dst[dst_fmt.u..].as_mut_ptr();
+            let dst_v = dst[dst_fmt.v..].as_mut_ptr();
+            call_yuv!(ARGBToI444(
+                mid_data.as_ptr(),
+                mid_stride as _,
+                dst_y,
+                dst_stride_y as _,
+                dst_u,
+                dst_stride_u as _,
+                dst_v,
+                dst_stride_v as _,
+                src_width as _,
+                src_height as _,
+            ));
+        }
         (crate::Pixfmt::BGRA, crate::Pixfmt::I420)
         | (crate::Pixfmt::RGBA, crate::Pixfmt::I420)
         | (crate::Pixfmt::RGB565LE, crate::Pixfmt::I420) => {
@@ -201,7 +370,12 @@ pub fn convert_to_yuv(
 #[cfg(not(target_os = "ios"))]
 pub fn convert(captured: &PixelBuffer, pixfmt: crate::Pixfmt, dst: &mut Vec<u8>) -> ResultType<()> {
     if captured.pixfmt() == pixfmt {
-        dst.extend_from_slice(captured.data());
+        if let Some((y, uv)) = captured.nv12_planes() {
+            dst.extend_from_slice(y);
+            dst.extend_from_slice(uv);
+        } else {
+            dst.extend_from_slice(captured.data());
+        }
         return Ok(());
     }
 
@@ -217,6 +391,27 @@ pub fn convert(captured: &PixelBuffer, pixfmt: crate::Pixfmt, dst: &mut Vec<u8>)
     );
 
     match (src_pixfmt, pixfmt) {
+        (crate::Pixfmt::NV12, crate::Pixfmt::RGBA) | (crate::Pixfmt::NV12, crate::Pixfmt::BGRA) => {
+            let (src_y, src_uv) =
+                extract_nv12_planes(captured, src, &src_stride, src_width, src_height)?;
+            let dst_stride = src_width * 4;
+            dst.resize(dst_stride * src_height, 0);
+            let f = if pixfmt == crate::Pixfmt::RGBA {
+                NV12ToABGR
+            } else {
+                NV12ToARGB
+            };
+            call_yuv!(f(
+                src_y.as_ptr(),
+                src_stride[0] as _,
+                src_uv.as_ptr(),
+                src_stride[1] as _,
+                dst.as_mut_ptr(),
+                dst_stride as _,
+                src_width as _,
+                src_height as _,
+            ));
+        }
         (crate::Pixfmt::BGRA, crate::Pixfmt::RGBA) | (crate::Pixfmt::RGBA, crate::Pixfmt::BGRA) => {
             dst.resize(src.len(), 0);
             call_yuv!(ABGRToARGB(

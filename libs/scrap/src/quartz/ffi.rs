@@ -14,6 +14,9 @@ pub type DispatchQueue = *mut c_void;
 pub type DispatchQueueAttr = *mut c_void;
 pub type CFAllocatorRef = *mut c_void;
 
+pub(super) const DISPLAY_STREAM_UPDATE_DIRTY_RECTS: i32 = 2;
+pub(super) type SckFrameCallback = unsafe extern "C" fn(*mut c_void, IOSurfaceRef);
+
 #[repr(C)]
 pub struct CFDictionaryKeyCallBacks {
     callbacks: [usize; 5],
@@ -162,6 +165,12 @@ extern "C" {
     pub static kCGDisplayStreamPreserveAspectRatio: CFStringRef;
     pub static kCGDisplayStreamMinimumFrameTime: CFStringRef;
     pub static kCGDisplayStreamQueueDepth: CFStringRef;
+    pub(super) static kCGDisplayStreamColorSpace: CFStringRef;
+    pub(super) static kCGDisplayStreamYCbCrMatrix: CFStringRef;
+    pub(super) static kCGDisplayStreamYCbCrMatrix_ITU_R_601_4: CFStringRef;
+    pub(super) static kCGColorSpaceSRGB: CFStringRef;
+
+    pub(super) fn CGColorSpaceCreateWithName(name: CFStringRef) -> *mut c_void;
 
     pub fn CGDisplayStreamCreateWithDispatchQueue(
         display: u32,
@@ -176,6 +185,12 @@ extern "C" {
     pub fn CGDisplayStreamStart(displayStream: CGDisplayStreamRef) -> CGError;
 
     pub fn CGDisplayStreamStop(displayStream: CGDisplayStreamRef) -> CGError;
+
+    pub(super) fn CGDisplayStreamUpdateGetRects(
+        updateRef: CGDisplayStreamUpdateRef,
+        rectType: i32,
+        rectCount: *mut usize,
+    ) -> *const CGRect;
 
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsWide(display: u32) -> usize;
@@ -205,6 +220,26 @@ extern "C" {
     pub fn IOSurfaceUnlock(buffer: IOSurfaceRef, options: u32, seed: *mut u32) -> i32;
     pub fn IOSurfaceGetBaseAddressOfPlane(buffer: IOSurfaceRef, index: usize) -> *mut c_void;
     pub fn IOSurfaceGetBytesPerRowOfPlane(buffer: IOSurfaceRef, index: usize) -> usize;
+    pub(super) fn IOSurfaceGetPixelFormat(buffer: IOSurfaceRef) -> i32;
+    pub(super) fn IOSurfaceGetPlaneCount(buffer: IOSurfaceRef) -> usize;
+    pub(super) fn IOSurfaceGetBytesPerRow(buffer: IOSurfaceRef) -> usize;
+    pub(super) fn IOSurfaceGetHeight(buffer: IOSurfaceRef) -> usize;
+    pub(super) fn IOSurfaceGetHeightOfPlane(buffer: IOSurfaceRef, index: usize) -> usize;
+
+    // ScreenCaptureKit C-ABI bridge (sck.mm)
+
+    pub(super) fn rustdesk_sck_capturer_create(
+        display_id: u32,
+        width: usize,
+        height: usize,
+        show_cursor: bool,
+        min_frame_interval_sec: f64,
+        queue_depth: i32,
+        callback: SckFrameCallback,
+        user_data: *mut c_void,
+    ) -> *mut c_void;
+    pub(super) fn rustdesk_sck_capturer_has_error(handle: *mut c_void) -> bool;
+    pub(super) fn rustdesk_sck_capturer_destroy(handle: *mut c_void);
 
     // Dispatch
 

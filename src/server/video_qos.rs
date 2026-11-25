@@ -12,8 +12,8 @@ b. TestDelay reply => update the user's fps from the excess delay, the reply's d
    above the baseline this connection has shown so far:
      startup: two consecutive replies with excess < 50 ms permit doubling toward
        the viewer's cap; a higher excess or a brake ends this acceleration;
-     excess < DELAY_THRESHOLD_150MS: a good reply; grows the fps, and after a
-       reduction returns to the level held before it after two good replies;
+     excess < DELAY_THRESHOLD_150MS: a good reply; grows the fps. After a
+       reduction, recovery waits for excess < 50 ms and raises the target in steps;
      excess >= DELAY_THRESHOLD_150MS: a bad reply; nothing happens until three in a
        row confirm congestion, including after each reduction. FPS drops by a
        fifth at most; a second of excess cannot wait and halves it immediately.
@@ -29,7 +29,8 @@ d. second timeout / TestDelay reply => real fps is the minimum over all users;
    own limit, never by that minimum or by another user's limit
 
 ratio adjust:
-a. user set image quality => update to the maximum ratio of the latest quality
+a. user set image quality => the requested ratio caps the current one; a lower
+   request applies at once, a higher one is reached by ABR alone
 b. 3 seconds timeout => update ratio according to network delay
     When network delay < DELAY_THRESHOLD_150MS, increase ratio, max 150kbps;
     When a user calls for a reduction (two bad replies in a row, or a probe still
@@ -52,6 +53,7 @@ pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
 pub const INIT_FPS: u32 = 15;
+const MIN_INTERACTIVE_FPS: u32 = 30;
 const MIN_AUTO_FPS: u32 = 5;
 
 // Bitrate ratio constants for different quality levels
@@ -64,6 +66,8 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
+const RECOVERY_QUEUE_LIMIT_MS: u32 = 50;
+const MAX_RECOVERY_STEP_FPS: u32 = 5;
 const RESTORE_GUARD_SAMPLES: u8 = 5; // A restored level that congests this soon is lowered
 
 #[derive(Default, Debug, Clone)]
@@ -109,6 +113,13 @@ impl UserDelay {
             self.consecutive_bad_samples = 0;
             self.fps_bad_samples = 0;
             self.replies_after_bitrate_reduction = None;
+            if delay >= RECOVERY_QUEUE_LIMIT_MS
+                && self
+                    .fps_before_congestion
+                    .is_some_and(|level| level > current_fps)
+            {
+                return current_fps;
+            }
             self.good_samples = (self.good_samples + 1).min(3);
             return self.recover(current_fps, fps);
         }
@@ -153,8 +164,7 @@ impl UserDelay {
         fps.max(current_fps.saturating_sub((current_fps / divisor).max(1)))
     }
 
-    // Fresh low-delay replies permit recovery even while the average contains a spike:
-    // a little at first, then back to the level held before congestion.
+    // Use fresh replies to recover even if the average still includes a spike.
     fn recover(&mut self, current_fps: u32, fps: u32) -> u32 {
         let gradual = current_fps + (current_fps / 10).max(1);
         let level = self
@@ -162,10 +172,14 @@ impl UserDelay {
             .filter(|level| *level > current_fps);
         match (self.good_samples, level) {
             (2 | 3, Some(level)) => {
-                self.fps_before_congestion = None;
-                self.samples_since_restore = Some(0);
-                fps.max(level)
+                let next_fps = fps.max(level).min(current_fps + MAX_RECOVERY_STEP_FPS);
+                if next_fps >= level {
+                    self.fps_before_congestion = None;
+                    self.samples_since_restore = Some(0);
+                }
+                next_fps
             }
+            (_, Some(_)) => gradual.min(current_fps + MAX_RECOVERY_STEP_FPS),
             (3, None) => {
                 self.fps_before_congestion = None;
                 fps.max(current_fps + (current_fps / 5).max(2))
@@ -400,6 +414,10 @@ impl VideoQoS {
         };
         self.users.insert(id, user);
         self.abr_config = Config::get_option("enable-abr") != "N";
+        // A new session starts conservative: the probed ratio of the previous
+        // one says nothing about this session's link, and a departing viewer's
+        // entry can outlive its connection.
+        self.ratio = BR_BALANCED;
     }
 
     // Clean up user session
@@ -419,8 +437,17 @@ impl VideoQoS {
             return;
         }
         if let Some(user) = self.users.get_mut(&id) {
+            // The first value is the viewer's own setting. Later values from a
+            // viewer without auto_adjust_fps are its automatic measurements, which
+            // must not ratchet the stream below interactive rates.
+            let fps = if user.custom_fps.is_some() && user.auto_adjust_fps.is_none() {
+                fps.max(MIN_INTERACTIVE_FPS)
+            } else {
+                fps
+            };
             user.custom_fps = Some(fps);
         }
+        self.adjust_fps();
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -428,8 +455,14 @@ impl VideoQoS {
             return;
         }
         if let Some(user) = self.users.get_mut(&id) {
+            let fps = fps.max(user.custom_fps.unwrap_or(FPS).min(MIN_INTERACTIVE_FPS));
+            let fps = user
+                .auto_adjust_fps
+                .map(|previous| fps.min(previous.saturating_add(MAX_RECOVERY_STEP_FPS)))
+                .unwrap_or(fps);
             user.auto_adjust_fps = Some(fps);
         }
+        self.adjust_fps();
     }
 
     pub fn user_image_quality(&mut self, id: i32, image_quality: i32) {
@@ -449,8 +482,10 @@ impl VideoQoS {
         let quality = Some((hbb_common::get_time(), convert_quality(image_quality)));
         if let Some(user) = self.users.get_mut(&id) {
             user.quality = quality;
-            // update ratio directly
-            self.ratio = self.latest_quality().ratio();
+            // The user's quality is a ceiling, not a starting point: a lower
+            // request applies at once, a higher one is approached by ABR only as
+            // fast as the link proves it can carry it.
+            self.ratio = self.ratio.min(self.latest_quality().ratio());
         }
     }
 
@@ -916,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn response_timeout_recovers_in_two_good_replies() {
+    fn response_timeout_recovers_in_steps() {
         let mut qos = stable_qos();
         qos.user_delay_response_elapsed(1, 3000);
         assert_eq!(qos.fps(), 7);
@@ -936,11 +971,13 @@ mod tests {
         qos.user_network_delay(1, 10);
         assert_eq!(
             qos.fps(),
-            FPS,
-            "the second good reply restores the frame rate"
+            13,
+            "the second good reply increases by at most five FPS"
         );
-        qos.user_network_delay(1, 10);
-        assert_eq!(qos.fps(), FPS, "the third keeps the restored frame rate");
+        for _ in 0..4 {
+            qos.user_network_delay(1, 10);
+        }
+        assert_eq!(qos.fps(), FPS);
     }
 
     #[test]
@@ -950,8 +987,9 @@ mod tests {
             qos.user_network_delay(1, 1200);
         }
         assert_eq!(qos.fps(), 8);
-        qos.user_network_delay(1, 10);
-        qos.user_network_delay(1, 10);
+        for _ in 0..6 {
+            qos.user_network_delay(1, 10);
+        }
         assert_eq!(qos.fps(), FPS);
         // The restored level congests at once, so the next restore aims lower.
         for _ in 0..3 {
@@ -965,7 +1003,9 @@ mod tests {
             "no return to the level that failed: {}",
             qos.fps()
         );
-        qos.user_network_delay(1, 10);
+        for _ in 0..5 {
+            qos.user_network_delay(1, 10);
+        }
         assert_eq!(qos.fps(), FPS, "ordinary recovery can still reach the cap");
     }
 

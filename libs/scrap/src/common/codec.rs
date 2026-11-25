@@ -293,7 +293,15 @@ impl Encoder {
         *format = match preference {
             PreferCodec::VP8 => CodecFormat::VP8,
             PreferCodec::VP9 => CodecFormat::VP9,
-            PreferCodec::AV1 => CodecFormat::AV1,
+            PreferCodec::AV1 => {
+                // Software AV1 cannot keep up with a full-resolution display; a
+                // hardware encoder that every peer can decode beats the preference.
+                if h264_useable || h265_useable {
+                    auto_codec
+                } else {
+                    CodecFormat::AV1
+                }
+            }
             PreferCodec::H264 => {
                 if h264vram_encoding || h264hw_encoding.is_some() {
                     CodecFormat::H264

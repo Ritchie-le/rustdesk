@@ -180,51 +180,62 @@ fn gen_vcpkg_package(package: &str, ffi_header: &str, generated: &str, regex: &s
     generate_bindings(&ffi_header, &includes, &ffi_rs, &exact_file, regex);
 }
 
-// If you have problems installing ffmpeg, you can download $VCPKG_ROOT/installed from ci
-// Linux require link in hwcodec
-/*
-fn ffmpeg() {
-    // ffmpeg
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let static_libs = vec!["avcodec", "avutil", "avformat"];
-    static_libs.iter().for_each(|lib| {
-        find_package(lib);
-    });
-    if target_os == "windows" {
-        println!("cargo:rustc-link-lib=static=libmfx");
-    }
+fn build_macos_sck() {
+    let src_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let sck_src = src_dir.join("src").join("quartz").join("sck.mm");
+    let sck_obj = out_dir.join("sck.o");
+    let sck_lib = out_dir.join("libsck_capture.a");
 
-    // os
-    let dyn_libs: Vec<&str> = if target_os == "windows" {
-        ["User32", "bcrypt", "ole32", "advapi32"].to_vec()
-    } else if target_os == "linux" {
-        let mut v = ["va", "va-drm", "va-x11", "vdpau", "X11", "stdc++"].to_vec();
-        if target_arch == "x86_64" {
-            v.push("z");
-        }
-        v
-    } else if target_os == "macos" || target_os == "ios" {
-        ["c++", "m"].to_vec()
-    } else if target_os == "android" {
-        ["z", "m", "android", "atomic"].to_vec()
+    println!("cargo:rerun-if-changed={}", sck_src.display());
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "aarch64".to_owned());
+    let clang_arch = if target_arch == "aarch64" {
+        "arm64"
     } else {
-        panic!("unsupported os");
+        "x86_64"
     };
-    dyn_libs
-        .iter()
-        .map(|lib| println!("cargo:rustc-link-lib={}", lib))
-        .count();
+    let min_macos = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "12.3".to_owned());
 
-    if target_os == "macos" || target_os == "ios" {
-        println!("cargo:rustc-link-lib=framework=CoreFoundation");
-        println!("cargo:rustc-link-lib=framework=CoreVideo");
-        println!("cargo:rustc-link-lib=framework=CoreMedia");
-        println!("cargo:rustc-link-lib=framework=VideoToolbox");
-        println!("cargo:rustc-link-lib=framework=AVFoundation");
+    let status = std::process::Command::new("xcrun")
+        .args([
+            "clang++",
+            "-std=c++17",
+            "-fobjc-arc",
+            "-O2",
+            "-fPIC",
+            "-arch",
+            clang_arch,
+            &format!("-mmacosx-version-min={}", min_macos),
+            "-c",
+            sck_src.to_str().unwrap(),
+            "-o",
+            sck_obj.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to execute xcrun clang++ for sck.mm");
+    assert!(status.success(), "failed to compile src/quartz/sck.mm");
+
+    let _ = fs::remove_file(&sck_lib);
+    let ar_status = std::process::Command::new("ar")
+        .args(["crs", sck_lib.to_str().unwrap(), sck_obj.to_str().unwrap()])
+        .status()
+        .expect("failed to execute ar for libsck_capture.a");
+    assert!(ar_status.success(), "failed to archive libsck_capture.a");
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=sck_capture");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
+    println!("cargo:rustc-link-lib=framework=CoreVideo");
+    println!("cargo:rustc-link-lib=framework=IOSurface");
+    let min_ver: f32 = min_macos.parse().unwrap_or(12.3);
+    if min_ver >= 12.3 {
+        println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
     }
 }
-*/
 
 fn main() {
     // in this crate, these are also valid configurations
@@ -233,10 +244,6 @@ fn main() {
     // there is problem with cfg(target_os) in build.rs, so use our workaround
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
 
-    // note: all link symbol names in x86 (32-bit) are prefixed wth "_".
-    // run "rustup show" to show current default toolchain, if it is stable-x86-pc-windows-msvc,
-    // please install x64 toolchain by "rustup toolchain install stable-x86_64-pc-windows-msvc",
-    // then set x64 to default by "rustup default stable-x86_64-pc-windows-msvc"
     let target = target_build_utils::TargetInfo::new();
     if target.unwrap().target_pointer_width() != "64" {
         // panic!("Only support 64bit system");
@@ -248,7 +255,10 @@ fn main() {
     gen_vcpkg_package("libvpx", "vpx_ffi.h", "vpx_ffi.rs", "^[vV].*");
     gen_vcpkg_package("aom", "aom_ffi.h", "aom_ffi.rs", "^(aom|AOM|OBU|AV1).*");
     gen_vcpkg_package("libyuv", "yuv_ffi.h", "yuv_ffi.rs", ".*");
-    // ffmpeg();
+
+    if target_os == "macos" {
+        build_macos_sck();
+    }
 
     if target_os == "ios" {
         // nothing

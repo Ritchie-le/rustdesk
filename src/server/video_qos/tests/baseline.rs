@@ -56,7 +56,8 @@ fn stable_path_change_recovers_without_reconnecting() {
                 "| {abr} | 10 -> {delay} ms | {first_recovered:?} | {base} | {} |",
                 qos.fps()
             );
-            assert!(first_recovered.is_some_and(|s| s <= 30));
+            // Allow five more probes for paced recovery from the 5 FPS floor.
+            assert!(first_recovered.is_some_and(|s| s <= 35));
             assert_eq!(base, delay);
             second(&mut qos, 10);
             assert_eq!(qos.users[&1].delay.rtt_calculator.get_rtt(), Some(10));

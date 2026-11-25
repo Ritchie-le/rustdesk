@@ -103,6 +103,7 @@ mod audio_playback_recovery;
 #[path = "client/tests/audio_state_tests.rs"]
 mod audio_state_tests;
 pub mod file_trait;
+mod fps_recovery;
 pub mod helper;
 pub mod io_loop;
 pub mod screenshot;

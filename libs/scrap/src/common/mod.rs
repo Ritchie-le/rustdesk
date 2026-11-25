@@ -173,6 +173,10 @@ pub trait TraitPixelBuffer {
     fn stride(&self) -> Vec<usize>;
 
     fn pixfmt(&self) -> Pixfmt;
+
+    fn nv12_planes(&self) -> Option<(&[u8], &[u8])> {
+        None
+    }
 }
 
 #[cfg(not(any(target_os = "ios")))]

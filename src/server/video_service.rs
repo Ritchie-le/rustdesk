@@ -1512,6 +1512,11 @@ pub fn set_take_screenshot(source: VideoSource, display_idx: usize, sid: String,
 
 // We need to this function, because the `stride` may be larger than `width * 4`.
 fn get_rgba_from_pixelbuf<'a>(pixbuf: &scrap::PixelBuffer<'a>) -> ResultType<Vec<u8>> {
+    if pixbuf.pixfmt() == scrap::Pixfmt::NV12 {
+        let mut rgba = vec![];
+        scrap::convert(pixbuf, scrap::Pixfmt::RGBA, &mut rgba)?;
+        return Ok(rgba);
+    }
     let w = pixbuf.width();
     let h = pixbuf.height();
     let stride = pixbuf.stride();

@@ -1,12 +1,11 @@
 use crate::{quartz, Frame, Pixfmt};
+use std::io;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, TryLockError};
-use std::{io, mem};
 
 pub struct Capturer {
     inner: quartz::Capturer,
-    frame: Arc<Mutex<Option<quartz::Frame>>>,
-    saved_raw_data: Vec<u8>, // for faster compare and copy
+    frame: Arc<Mutex<Option<quartz::RawSurface>>>,
 }
 
 impl Capturer {
@@ -14,25 +13,21 @@ impl Capturer {
         let frame = Arc::new(Mutex::new(None));
 
         let f = frame.clone();
-        let inner = quartz::Capturer::new(
+        let inner = quartz::Capturer::new_raw(
             display.0,
             display.width(),
             display.height(),
-            quartz::PixelFormat::Argb8888,
+            quartz::PixelFormat::YCbCr420Video,
             Default::default(),
-            move |inner| {
+            move |raw: quartz::RawSurface| {
                 if let Ok(mut f) = f.lock() {
-                    *f = Some(inner);
+                    *f = Some(raw);
                 }
             },
         )
         .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
 
-        Ok(Capturer {
-            inner,
-            frame,
-            saved_raw_data: Vec::new(),
-        })
+        Ok(Capturer { inner, frame })
     }
 
     pub fn width(&self) -> usize {
@@ -46,26 +41,25 @@ impl Capturer {
 
 impl crate::TraitCapturer for Capturer {
     fn frame<'a>(&'a mut self, _timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
+        if self.inner.has_error() {
+            return Err(io::ErrorKind::ConnectionReset.into());
+        }
         match self.frame.try_lock() {
-            Ok(mut handle) => {
-                let mut frame = None;
-                mem::swap(&mut frame, &mut handle);
-
-                match frame {
-                    Some(mut frame) => {
-                        crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
-                        frame.surface_to_bgra(self.height());
-                        Ok(Frame::PixelBuffer(PixelBuffer {
-                            frame,
-                            data: PhantomData,
-                            width: self.width(),
-                            height: self.height(),
-                        }))
+            Ok(mut handle) => match handle.take() {
+                Some(raw) => {
+                    let frame = quartz::Frame::from_raw(raw);
+                    if frame.primary_plane().is_empty() {
+                        return Err(io::ErrorKind::WouldBlock.into());
                     }
-
-                    None => Err(io::ErrorKind::WouldBlock.into()),
+                    Ok(Frame::PixelBuffer(PixelBuffer {
+                        frame,
+                        data: PhantomData,
+                        width: self.width(),
+                        height: self.height(),
+                    }))
                 }
-            }
+                None => Err(io::ErrorKind::WouldBlock.into()),
+            },
 
             Err(TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
 
@@ -83,7 +77,7 @@ pub struct PixelBuffer<'a> {
 
 impl<'a> crate::TraitPixelBuffer for PixelBuffer<'a> {
     fn data(&self) -> &[u8] {
-        &*self.frame
+        self.frame.primary_plane()
     }
 
     fn width(&self) -> usize {
@@ -95,13 +89,15 @@ impl<'a> crate::TraitPixelBuffer for PixelBuffer<'a> {
     }
 
     fn stride(&self) -> Vec<usize> {
-        let mut v = Vec::new();
-        v.push(self.frame.stride());
-        v
+        self.frame.strides().to_vec()
     }
 
     fn pixfmt(&self) -> Pixfmt {
-        Pixfmt::BGRA
+        self.frame.pixfmt()
+    }
+
+    fn nv12_planes(&self) -> Option<(&[u8], &[u8])> {
+        self.frame.nv12_planes()
     }
 }
 
