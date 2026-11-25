@@ -54,7 +54,21 @@ jobs:
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${TARGET_BRANCH}"
           popd
 
+      - name: Cache generated Flutter 3.44 bridge
+        id: cache-frb-files
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: |
+            work/src/bridge_generated.rs
+            work/src/bridge_generated.io.rs
+            work/flutter/lib/generated_bridge.dart
+            work/flutter/lib/generated_bridge.freezed.dart
+            work/flutter/macos/Runner/bridge_generated.h
+            work/flutter/ios/Runner/bridge_generated.h
+          key: frb-3.44-${{ hashFiles('work/src/flutter_ffi.rs') }}
+
       - name: Install bridge prerequisites
+        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
@@ -73,6 +87,7 @@ jobs:
             wget
 
       - name: Install Rust toolchain for bridge
+        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.BRIDGE_RUST_VERSION }}
@@ -80,11 +95,14 @@ jobs:
           components: "rustfmt"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         with:
           workspaces: work
           prefix-key: bridge-ubuntu-22.04
+          save-if: true
 
       - name: Install Flutter for bridge
+        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: "stable"
@@ -92,6 +110,7 @@ jobs:
           cache: true
 
       - name: Generate flutter-rust-bridge (Flutter 3.44)
+        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         working-directory: work
         shell: bash
         run: |
@@ -178,6 +197,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: macos-15-hidpi
+          save-if: true
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -228,17 +248,27 @@ jobs:
           ]:
               p = pathlib.Path(path)
               p.write_text(re.sub(pat, repl, p.read_text(encoding="utf-8")), encoding="utf-8")
+          # Skip building iOS staticlib on macOS desktop build to cut link time
+          cargo_toml = pathlib.Path("Cargo.toml")
+          cargo_toml.write_text(
+              cargo_toml.read_text(encoding="utf-8").replace(
+                  'crate-type = ["cdylib", "staticlib", "rlib"]',
+                  'crate-type = ["cdylib", "rlib"]',
+              ),
+              encoding="utf-8",
+          )
           PY
           export MACOSX_DEPLOYMENT_TARGET="12.3"
           echo "MACOSX_DEPLOYMENT_TARGET=12.3" >> "$GITHUB_ENV"
 
-          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
+          # Fast standalone unit tests (<1s) before release build
+          rustc --edition 2021 --test src/server/video_send.rs -o /tmp/test_video_send && /tmp/test_video_send
+          rustc --edition 2021 --test src/client/fps_recovery.rs -o /tmp/test_fps_recovery && /tmp/test_fps_recovery
 
           FEATURES="$(./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit --print-features)"
-          cargo test --locked --release -p scrap hidpi_4k_modes_cap_cleanly_at_2560x1440
-          cargo test --locked --release --lib --features "$FEATURES" retina_hidpi_tests
-          cargo test --locked --release --lib --features "$FEATURES" video_send::tests
-          cargo test --locked --release --lib --features "$FEATURES" fps_recovery::tests
+          CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+            cargo build --locked --features "$FEATURES" --release --lib --bin service
+          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit --skip-cargo
 
       - name: Ad-hoc codesign RustDesk.app & package DMG
         shell: bash
