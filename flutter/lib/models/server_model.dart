@@ -51,6 +51,12 @@ class ServerModel with ChangeNotifier {
   final List<Client> _clients = [];
 
   Timer? cmHiddenTimer;
+  bool _cmAutoHidden = false;
+
+  void autoHideCmWindow() {
+    _cmAutoHidden = true;
+    hideCmWindow();
+  }
 
   final _wakelockKey = UniqueKey();
 
@@ -165,6 +171,7 @@ class ServerModel with ChangeNotifier {
           updateClientState(res);
         } else {
           if (_clients.isEmpty) {
+            _cmAutoHidden = false;
             hideCmWindow();
             if (_zeroClientLengthCounter++ == 12) {
               // 6 second
@@ -172,7 +179,7 @@ class ServerModel with ChangeNotifier {
             }
           } else {
             _zeroClientLengthCounter = 0;
-            if (!hideCm) showCmWindow();
+            if (!hideCm && !_cmAutoHidden) showCmWindow();
           }
         }
       }
@@ -521,8 +528,9 @@ class ServerModel with ChangeNotifier {
     }
     if (desktopType == DesktopType.cm) {
       if (_clients.isEmpty) {
+        _cmAutoHidden = false;
         hideCmWindow();
-      } else if (!hideCm) {
+      } else if (!hideCm && !_cmAutoHidden) {
         showCmWindow();
       }
     }
@@ -566,6 +574,7 @@ class ServerModel with ChangeNotifier {
         _clients.removeAt(index_disconnected);
         tabController.remove(index_disconnected);
       }
+      _cmAutoHidden = false;
       if (desktopType == DesktopType.cm && !hideCm) {
         showCmWindow();
       }
@@ -590,8 +599,15 @@ class ServerModel with ChangeNotifier {
     });
     // Only do the hidden task when on Desktop.
     if (client.authorized && isDesktop) {
+      cmHiddenTimer?.cancel();
       cmHiddenTimer = Timer(const Duration(seconds: 3), () {
-        if (!hideCm) windowManager.minimize();
+        if (!hideCm) {
+          if (isMacOS) {
+            autoHideCmWindow();
+          } else {
+            windowManager.minimize();
+          }
+        }
         cmHiddenTimer = null;
       });
     }
@@ -721,6 +737,7 @@ class ServerModel with ChangeNotifier {
         parent.target?.invokeMethod("cancel_notification", id);
       }
       if (desktopType == DesktopType.cm && _clients.isEmpty) {
+        _cmAutoHidden = false;
         hideCmWindow();
       }
       if (isAndroid) androidUpdatekeepScreenOn();

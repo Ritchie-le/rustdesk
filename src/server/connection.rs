@@ -1077,12 +1077,27 @@ impl Connection {
                     }
                 }
                 Some((instant, value)) = rx_video.recv() => {
-                    if !conn.video_ack_required {
-                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
-                        }
-                    }
-                    if let Err(err) = conn.stream.send(&value as &Message).await {
+                    let fetched_display = if conn.video_ack_required {
+                        None
+                    } else if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                        Some(vf.display as usize)
+                    } else {
+                        None
+                    };
+                    let sent = super::video_send::complete_video_send(
+                        conn.stream.send(&value as &Message),
+                        || {
+                            if let Some(display) = fetched_display {
+                                video_service::notify_video_frame_fetched(
+                                    display,
+                                    id,
+                                    Some(instant.into()),
+                                );
+                            }
+                        },
+                    )
+                    .await;
+                    if let Err(err) = sent {
                         conn.on_close(&err.to_string(), false).await;
                         break;
                     }
@@ -4833,6 +4848,22 @@ impl Connection {
                 let display_idx = d.unwrap_or(self.display_idx);
                 if let Some(display) = displays.get(display_idx) {
                     let name = display.name();
+                    #[cfg(target_os = "macos")]
+                    if let Ok(display_id) = name.parse::<u32>() {
+                        scrap::quartz::set_target_resolution(
+                            display_id,
+                            r.width as usize,
+                            r.height as usize,
+                        );
+                        log::info!(
+                            "macOS adaptive capture target for display '{}' set to {}x{} (local HiDPI preserved)",
+                            name,
+                            r.width,
+                            r.height
+                        );
+                        let _ = display_service::check_displays_changed();
+                        return;
+                    }
                     #[cfg(windows)]
                     if let Some(_ok) =
                         virtual_display_manager::rustdesk_idd::change_resolution_if_is_virtual_display(
@@ -6818,7 +6849,13 @@ impl Retina {
             return;
         };
         let s = d.scale;
-        if s > 1.0 && e.x >= d.x && e.y >= d.y && e.x < d.x + d.width && e.y < d.y + d.height {
+        if s > 0.0
+            && (s - 1.0).abs() > 1e-4
+            && e.x >= d.x
+            && e.y >= d.y
+            && e.x < d.x + d.width
+            && e.y < d.y + d.height
+        {
             e.x = d.x + ((e.x - d.x) as f64 / s) as i32;
             e.y = d.y + ((e.y - d.y) as f64 / s) as i32;
         }
@@ -6830,7 +6867,8 @@ impl Retina {
             return None;
         };
         let s = d.scale;
-        if s > 1.0
+        if s > 0.0
+            && (s - 1.0).abs() > 1e-4
             && pos.x >= d.x
             && pos.y >= d.y
             && (pos.x - d.x) as f64 * s < d.width as f64
@@ -6844,6 +6882,61 @@ impl Retina {
             return Some(msg);
         }
         None
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod retina_hidpi_tests {
+    use super::*;
+
+    #[test]
+    fn retina_maps_fractional_and_sub_unit_hidpi_scales() {
+        // Case 1: 4K "Looks like 1920x1080" capped to 2560x1440 (scale = 4/3 > 1.0)
+        let mut r = Retina::default();
+        r.set_displays(&vec![DisplayInfo {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 2560.0 / 1920.0,
+            ..Default::default()
+        }]);
+        let mut me = MouseEvent {
+            x: 1280,
+            y: 720,
+            ..Default::default()
+        };
+        r.on_mouse_event(&mut me, 0);
+        assert_eq!((me.x, me.y), (960, 540));
+
+        // Case 2: 4K "Looks like 3008x1692" capped to 2560x1440 (scale = 2560/3008 < 1.0)
+        r.set_displays(&vec![DisplayInfo {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 2560.0 / 3008.0,
+            ..Default::default()
+        }]);
+        let mut me2 = MouseEvent {
+            x: 1280,
+            y: 720,
+            ..Default::default()
+        };
+        r.on_mouse_event(&mut me2, 0);
+        assert_eq!((me2.x, me2.y), (1504, 846));
+
+        let cp = CursorPosition {
+            x: 1504,
+            y: 846,
+            ..Default::default()
+        };
+        let mapped = r.on_cursor_pos(&cp, 0).expect("cursor pos should scale");
+        if let Some(message::Union::CursorPosition(cp_out)) = mapped.union {
+            assert_eq!((cp_out.x, cp_out.y), (1280, 720));
+        } else {
+            panic!("expected cursor_position union");
+        }
     }
 }
 

@@ -321,8 +321,11 @@ showCmWindow({bool isStartup = false}) async {
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 1) {
       await windowManager.setOpacity(1);
+      if (isMacOS) {
+        await windowManager.show();
+      }
       await windowManager.focus();
-      await windowManager.minimize(); //needed
+      if (!isMacOS) await windowManager.minimize(); //needed
       await windowManager.setSizeAlignment(
           kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
       windowOnTop(null);
@@ -337,15 +340,15 @@ hideCmWindow({bool isStartup = false}) async {
     windowManager.setOpacity(0);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
     bind.mainHideDock();
-    await windowManager.minimize();
+    if (!isMacOS) await windowManager.minimize();
     await windowManager.hide();
     _isCmReadyToShow = true;
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 0) {
       await windowManager.setOpacity(0);
-      bind.mainHideDock();
-      await windowManager.minimize();
+      if (!isMacOS) await windowManager.minimize();
       await windowManager.hide();
+      bind.mainHideDock();
     }
   }
 }

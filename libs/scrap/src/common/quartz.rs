@@ -1,28 +1,36 @@
 use crate::{quartz, Frame, Pixfmt};
+use std::io;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, TryLockError};
-use std::{io, mem};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub struct Capturer {
     inner: quartz::Capturer,
-    frame: Arc<Mutex<Option<quartz::Frame>>>,
-    saved_raw_data: Vec<u8>, // for faster compare and copy
+    frame: Arc<(Mutex<Option<quartz::RawSurface>>, Condvar)>,
+    sharpen_luma: bool,
 }
 
 impl Capturer {
     pub fn new(display: Display) -> io::Result<Capturer> {
-        let frame = Arc::new(Mutex::new(None));
+        let frame = Arc::new((Mutex::new(None), Condvar::new()));
+        let sharpen_luma = display.0.is_hidpi_downscaled();
 
+        let pixel_format = if crate::codec::Encoder::prefer_i444_capture() {
+            quartz::PixelFormat::Argb8888
+        } else {
+            quartz::PixelFormat::YCbCr420Video
+        };
         let f = frame.clone();
-        let inner = quartz::Capturer::new(
+        let inner = quartz::Capturer::new_raw(
             display.0,
             display.width(),
             display.height(),
-            quartz::PixelFormat::Argb8888,
+            pixel_format,
             Default::default(),
-            move |inner| {
-                if let Ok(mut f) = f.lock() {
-                    *f = Some(inner);
+            move |raw: quartz::RawSurface| {
+                let (lock, cvar) = &*f;
+                if let Ok(mut slot) = lock.lock() {
+                    *slot = Some(raw);
+                    cvar.notify_one();
                 }
             },
         )
@@ -31,7 +39,7 @@ impl Capturer {
         Ok(Capturer {
             inner,
             frame,
-            saved_raw_data: Vec::new(),
+            sharpen_luma,
         })
     }
 
@@ -45,31 +53,34 @@ impl Capturer {
 }
 
 impl crate::TraitCapturer for Capturer {
-    fn frame<'a>(&'a mut self, _timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
-        match self.frame.try_lock() {
-            Ok(mut handle) => {
-                let mut frame = None;
-                mem::swap(&mut frame, &mut handle);
-
-                match frame {
-                    Some(mut frame) => {
-                        crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
-                        frame.surface_to_bgra(self.height());
-                        Ok(Frame::PixelBuffer(PixelBuffer {
-                            frame,
-                            data: PhantomData,
-                            width: self.width(),
-                            height: self.height(),
-                        }))
-                    }
-
-                    None => Err(io::ErrorKind::WouldBlock.into()),
+    fn frame<'a>(&'a mut self, timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
+        if self.inner.has_error() {
+            return Err(io::ErrorKind::ConnectionReset.into());
+        }
+        let (lock, cvar) = &*self.frame;
+        let mut handle = lock.lock().map_err(|_| io::Error::from(io::ErrorKind::Other))?;
+        if handle.is_none() && !timeout_ms.is_zero() {
+            let (guard, _) = cvar
+                .wait_timeout(handle, timeout_ms)
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
+            handle = guard;
+        }
+        match handle.take() {
+            Some(raw) => {
+                drop(handle);
+                let frame = quartz::Frame::from_raw(raw);
+                if frame.primary_plane().is_empty() {
+                    return Err(io::ErrorKind::WouldBlock.into());
                 }
+                Ok(Frame::PixelBuffer(PixelBuffer {
+                    frame,
+                    data: PhantomData,
+                    width: self.width(),
+                    height: self.height(),
+                    sharpen_luma: self.sharpen_luma,
+                }))
             }
-
-            Err(TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
-
-            Err(TryLockError::Poisoned(..)) => Err(io::ErrorKind::Other.into()),
+            None => Err(io::ErrorKind::WouldBlock.into()),
         }
     }
 }
@@ -79,11 +90,12 @@ pub struct PixelBuffer<'a> {
     data: PhantomData<&'a [u8]>,
     width: usize,
     height: usize,
+    sharpen_luma: bool,
 }
 
 impl<'a> crate::TraitPixelBuffer for PixelBuffer<'a> {
     fn data(&self) -> &[u8] {
-        &*self.frame
+        self.frame.primary_plane()
     }
 
     fn width(&self) -> usize {
@@ -95,13 +107,19 @@ impl<'a> crate::TraitPixelBuffer for PixelBuffer<'a> {
     }
 
     fn stride(&self) -> Vec<usize> {
-        let mut v = Vec::new();
-        v.push(self.frame.stride());
-        v
+        self.frame.strides().to_vec()
     }
 
     fn pixfmt(&self) -> Pixfmt {
-        Pixfmt::BGRA
+        self.frame.pixfmt()
+    }
+
+    fn nv12_planes(&self) -> Option<(&[u8], &[u8])> {
+        self.frame.nv12_planes()
+    }
+
+    fn should_sharpen_luma(&self) -> bool {
+        self.sharpen_luma
     }
 }
 

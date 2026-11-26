@@ -408,6 +408,30 @@ class _GeneralState extends State<_General> {
       isWeb ? RxBool(false) : Get.find<RxBool>(tag: 'stop-service');
   RxBool serviceBtnEnabled = true.obs;
   final GlobalKey _minToolbarOptionKey = GlobalKey();
+  double _macosSharpenStrength = 55;
+  String _macosSharpenMode = 'hidpi';
+  double _macosH265MaxMbps = 14;
+
+  @override
+  void initState() {
+    super.initState();
+    if (isMacOS) {
+      final s = int.tryParse(
+          bind.mainGetOptionSync(key: 'macos-sharpen-strength').trim());
+      if (s != null) {
+        _macosSharpenStrength = s.clamp(0, 100).toDouble();
+      }
+      final m = bind.mainGetOptionSync(key: 'macos-sharpen-mode').trim();
+      if (m == 'off' || m == 'hidpi' || m == 'always') {
+        _macosSharpenMode = m;
+      }
+      final b = int.tryParse(
+          bind.mainGetOptionSync(key: 'macos-h265-max-mbps').trim());
+      if (b != null) {
+        _macosH265MaxMbps = b.clamp(6, 32).toDouble();
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -419,6 +443,7 @@ class _GeneralState extends State<_General> {
         theme(),
         _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),
+        if (isMacOS) macosTuning(context),
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
         if (!isWeb) WaylandCard(),
@@ -772,6 +797,110 @@ class _GeneralState extends State<_General> {
         )
       ]),
     );
+  }
+
+  Widget macosTuning(BuildContext context) {
+    return _Card(title: 'macOS HiDPI & H.265 调优', children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(
+            horizontal: _kContentHMargin, vertical: 6),
+        child: Row(
+          children: [
+            const SizedBox(width: 140, child: Text('文字锐化范围')),
+            Expanded(
+              child: ComboBox(
+                keys: const ['hidpi', 'always', 'off'],
+                values: const ['仅 HiDPI 降采样时', '始终开启', '关闭'],
+                initialKey: _macosSharpenMode,
+                onChanged: (key) async {
+                  setState(() {
+                    _macosSharpenMode = key;
+                  });
+                  await bind.mainSetOption(
+                      key: 'macos-sharpen-mode', value: key);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(
+            horizontal: _kContentHMargin, vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 140,
+              child: Text('文字锐化强度 (${_macosSharpenStrength.round()}%)'),
+            ),
+            Expanded(
+              child: Slider(
+                value: _macosSharpenStrength,
+                min: 0,
+                max: 100,
+                divisions: 20,
+                label: '${_macosSharpenStrength.round()}%',
+                onChanged: _macosSharpenMode == 'off'
+                    ? null
+                    : (v) {
+                        setState(() {
+                          _macosSharpenStrength = v;
+                        });
+                      },
+                onChangeEnd: _macosSharpenMode == 'off'
+                    ? null
+                    : (v) async {
+                        await bind.mainSetOption(
+                          key: 'macos-sharpen-strength',
+                          value: '${v.round()}',
+                        );
+                      },
+              ),
+            ),
+          ],
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(
+            horizontal: _kContentHMargin, vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 140,
+              child: Text('H.265 码率上限 (${_macosH265MaxMbps.round()} Mbps)'),
+            ),
+            Expanded(
+              child: Slider(
+                value: _macosH265MaxMbps,
+                min: 6,
+                max: 32,
+                divisions: 26,
+                label: '${_macosH265MaxMbps.round()} Mbps',
+                onChanged: (v) {
+                  setState(() {
+                    _macosH265MaxMbps = v;
+                  });
+                },
+                onChangeEnd: (v) async {
+                  await bind.mainSetOption(
+                    key: 'macos-h265-max-mbps',
+                    value: '${v.round()}',
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.only(
+            left: _kContentHMargin, right: _kContentHMargin, bottom: 8),
+        child: Text(
+          '拖动滑块约 1 秒内实时生效，无需重启；适当降低码率上限可减少切窗口时的延迟波动。',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+    ]);
   }
 
   Widget audio(BuildContext context) {

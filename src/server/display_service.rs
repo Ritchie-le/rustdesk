@@ -589,6 +589,8 @@ pub fn set_last_changed_resolution(display_name: &str, original: (i32, i32), cha
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn restore_resolutions() {
+    #[cfg(target_os = "macos")]
+    scrap::quartz::clear_target_resolutions();
     for (name, res) in CHANGED_RESOLUTIONS.read().unwrap().iter() {
         let (w, h) = res.original;
         log::info!("Restore resolution of display '{}' to ({}, {})", name, w, h);

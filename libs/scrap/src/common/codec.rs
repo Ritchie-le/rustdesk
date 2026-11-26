@@ -71,6 +71,14 @@ pub trait EncoderApi {
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()>;
 
+    fn set_fps(&mut self, _fps: u32) -> ResultType<()> {
+        Ok(())
+    }
+
+    fn set_max_bitrate_kbs(&mut self, _kbs: u32) -> ResultType<()> {
+        Ok(())
+    }
+
     fn bitrate(&self) -> u32;
 
     fn support_changing_quality(&self) -> bool;
@@ -417,6 +425,24 @@ impl Encoder {
             EncoderCfg::VRAM(_) => false,
         };
         prefer_i444 && i444_useable && !decodings.is_empty()
+    }
+
+    pub fn prefer_i444_capture() -> bool {
+        let decodings = PEER_DECODINGS.lock().unwrap().clone();
+        if decodings.is_empty() {
+            return false;
+        }
+        let prefer_i444 = decodings
+            .iter()
+            .all(|d| d.1.prefer_chroma == Chroma::I444.into());
+        if !prefer_i444 {
+            return false;
+        }
+        match Self::negotiated_codec() {
+            CodecFormat::VP9 => decodings.iter().all(|d| d.1.i444.vp9),
+            CodecFormat::AV1 => decodings.iter().all(|d| d.1.i444.av1),
+            _ => false,
+        }
     }
 }
 

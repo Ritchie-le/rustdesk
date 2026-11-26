@@ -649,9 +649,12 @@ fn run(vs: VideoService) -> ResultType<()> {
         log::info!("disable dxgi with option, fall back to gdi");
         c.set_gdi();
     }
+    sync_macos_tuning_options(None);
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     let mut spf = video_qos.spf();
     let mut quality = video_qos.ratio();
+    #[cfg(feature = "hwcodec")]
+    scrap::hwcodec::set_target_fps(video_qos.fps());
     let record_incoming = config::option2bool(
         "allow-auto-record-incoming",
         &Config::get_option("allow-auto-record-incoming"),
@@ -726,7 +729,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut yuv = Vec::new();
     let mut mid_data = Vec::new();
     let mut repeat_encode_counter = 0;
-    let repeat_encode_max = 10;
+    // On macOS VideoToolbox, 2 flush frames suffice to drain pipeline latency without
+    // blasting 10 redundant full-screen frames into WebRTC right after opening a window.
+    let repeat_encode_max = if cfg!(target_os = "macos") { 2 } else { 10 };
     let mut encode_fail_counter = 0;
     let mut first_frame = true;
     // Set once the encoder emits its first packet; until then it may legitimately return nothing.
@@ -1462,6 +1467,48 @@ pub fn make_display_changed_msg(
     Some(msg_out)
 }
 
+fn sync_macos_tuning_options(encoder: Option<&mut Encoder>) {
+    #[cfg(target_os = "macos")]
+    {
+        let strength = Config::get_option("macos-sharpen-strength")
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(55)
+            .min(100);
+        let mode = match Config::get_option("macos-sharpen-mode").trim() {
+            "off" => 0,
+            "always" => 2,
+            _ => 1,
+        };
+        scrap::convert::set_luma_sharpen(strength, mode);
+
+        let max_mbps = Config::get_option("macos-h265-max-mbps")
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(14)
+            .clamp(6, 32);
+        let max_kbs = max_mbps * 1000;
+        #[cfg(feature = "hwcodec")]
+        {
+            let prev = scrap::hwcodec::macos_h265_max_kbs();
+            scrap::hwcodec::set_macos_h265_max_kbs(max_kbs);
+            if let Some(enc) = encoder {
+                if prev != max_kbs {
+                    allow_err!(enc.set_max_bitrate_kbs(max_kbs));
+                }
+            }
+        }
+        #[cfg(not(feature = "hwcodec"))]
+        {
+            let _ = (max_kbs, encoder);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = encoder;
+    }
+}
+
 fn check_qos(
     encoder: &mut Encoder,
     ratio: &mut f32,
@@ -1473,6 +1520,7 @@ fn check_qos(
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
+    let current_fps = video_qos.fps();
     if *ratio != video_qos.ratio() {
         *ratio = video_qos.ratio();
         if encoder.support_changing_quality() {
@@ -1485,6 +1533,14 @@ fn check_qos(
                 bail!("SWITCH");
             }
         }
+    }
+    let prev_bitrate = encoder.bitrate();
+    allow_err!(encoder.set_fps(current_fps));
+    if second_instant.elapsed() > Duration::from_secs(1) {
+        sync_macos_tuning_options(Some(encoder));
+    }
+    if encoder.bitrate() != prev_bitrate {
+        video_qos.store_bitrate(encoder.bitrate());
     }
     if client_record != video_qos.record() {
         log::info!("switch due to record changed");
@@ -1512,6 +1568,11 @@ pub fn set_take_screenshot(source: VideoSource, display_idx: usize, sid: String,
 
 // We need to this function, because the `stride` may be larger than `width * 4`.
 fn get_rgba_from_pixelbuf<'a>(pixbuf: &scrap::PixelBuffer<'a>) -> ResultType<Vec<u8>> {
+    if pixbuf.pixfmt() == scrap::Pixfmt::NV12 {
+        let mut rgba = vec![];
+        scrap::convert(pixbuf, scrap::Pixfmt::RGBA, &mut rgba)?;
+        return Ok(rgba);
+    }
     let w = pixbuf.width();
     let h = pixbuf.height();
     let stride = pixbuf.stride();

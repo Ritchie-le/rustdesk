@@ -1023,7 +1023,11 @@ class _CmControlPanel extends StatelessWidget {
             color: MyTheme.accent,
             onClick: () {
               handleElevate(context);
-              windowManager.minimize();
+              if (isMacOS) {
+                gFFI.serverModel.autoHideCmWindow();
+              } else {
+                windowManager.minimize();
+              }
             },
             icon: Icon(
               Icons.security_rounded,
@@ -1086,7 +1090,11 @@ class _CmControlPanel extends StatelessWidget {
           child: buildButton(context, color: Colors.green[700], onClick: () {
             handleAccept(context);
             handleElevate(context);
-            windowManager.minimize();
+            if (isMacOS) {
+              gFFI.serverModel.autoHideCmWindow();
+            } else {
+              windowManager.minimize();
+            }
           },
               text: 'Accept and Elevate',
               icon: Icon(
@@ -1109,7 +1117,11 @@ class _CmControlPanel extends StatelessWidget {
                       color: MyTheme.accent,
                       onClick: () {
                         handleAccept(context);
-                        windowManager.minimize();
+                        if (isMacOS) {
+                          gFFI.serverModel.autoHideCmWindow();
+                        } else {
+                          windowManager.minimize();
+                        }
                       },
                       text: 'Accept',
                       textColor: Colors.white,

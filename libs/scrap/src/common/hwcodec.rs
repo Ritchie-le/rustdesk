@@ -30,6 +30,29 @@ mod tests;
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
+
+static TARGET_FPS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(DEFAULT_FPS as u32);
+static MACOS_H265_MAX_KBS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(14_000);
+
+pub fn set_target_fps(fps: u32) {
+    TARGET_FPS.store(fps.clamp(10, 120), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn target_fps() -> u32 {
+    TARGET_FPS.load(std::sync::atomic::Ordering::Relaxed).clamp(10, 120)
+}
+
+pub fn set_macos_h265_max_kbs(kbs: u32) {
+    MACOS_H265_MAX_KBS.store(kbs.clamp(6_000, 42_000), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn macos_h265_max_kbs() -> u32 {
+    MACOS_H265_MAX_KBS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .clamp(6_000, 42_000)
+}
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
@@ -52,11 +75,142 @@ pub struct HwRamEncoderConfig {
     pub keyframe_interval: Option<usize>,
 }
 
+#[cfg(target_os = "macos")]
+struct NativeVtHevc {
+    handle: *mut hbb_common::libc::c_void,
+    width: usize,
+    height: usize,
+    y_stride: usize,
+    uv_stride: usize,
+    uv_offset: usize,
+    first_frame: bool,
+    low_latency_rc: bool,
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for NativeVtHevc {}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn vt_hevc_output_trampoline(
+    user_data: *mut hbb_common::libc::c_void,
+    data: *const u8,
+    len: usize,
+    pts_ms: i64,
+    is_key: i32,
+) {
+    if user_data.is_null() || data.is_null() || len == 0 {
+        return;
+    }
+    let frames = &mut *(user_data as *mut Vec<EncodeFrame>);
+    let slice = std::slice::from_raw_parts(data, len);
+    frames.push(EncodeFrame {
+        data: slice.to_vec(),
+        pts: pts_ms,
+        key: is_key,
+    });
+}
+
+#[cfg(target_os = "macos")]
+impl NativeVtHevc {
+    fn new(width: usize, height: usize, kbs: u32, fps: u32, gop: i32) -> Option<Self> {
+        let mut llrc = false;
+        let handle = unsafe {
+            crate::quartz::ffi::rustdesk_vt_hevc_create(
+                width as i32,
+                height as i32,
+                kbs as i32,
+                fps as i32,
+                gop,
+                &mut llrc as *mut bool,
+            )
+        };
+        if handle.is_null() {
+            return None;
+        }
+        let y_stride = (width + HW_STRIDE_ALIGN - 1) & !(HW_STRIDE_ALIGN - 1);
+        let uv_stride = y_stride;
+        let uv_offset = y_stride * height;
+        Some(Self {
+            handle,
+            width,
+            height,
+            y_stride,
+            uv_stride,
+            uv_offset,
+            first_frame: true,
+            low_latency_rc: llrc,
+        })
+    }
+
+    fn update(&mut self, kbs: u32, fps: u32) {
+        unsafe {
+            crate::quartz::ffi::rustdesk_vt_hevc_update(self.handle, kbs as i32, fps as i32);
+        }
+    }
+
+    fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<EncodeFrame>> {
+        let mut frames = Vec::<EncodeFrame>::with_capacity(1);
+        let force_key = self.first_frame;
+        let ret = unsafe {
+            crate::quartz::ffi::rustdesk_vt_hevc_encode(
+                self.handle,
+                yuv.as_ptr(),
+                yuv.len(),
+                self.y_stride,
+                self.uv_offset,
+                self.uv_stride,
+                ms,
+                force_key,
+                vt_hevc_output_trampoline,
+                &mut frames as *mut Vec<EncodeFrame> as *mut hbb_common::libc::c_void,
+            )
+        };
+        if ret == 0 && !frames.is_empty() {
+            self.first_frame = false;
+            Ok(frames)
+        } else {
+            Err(anyhow!("Native VT HEVC encode failed: {}", ret))
+        }
+    }
+
+    fn yuvfmt(&self) -> crate::EncodeYuvFormat {
+        crate::EncodeYuvFormat {
+            pixfmt: Pixfmt::NV12,
+            w: self.width,
+            h: self.height,
+            stride: vec![self.y_stride, self.uv_stride],
+            u: self.uv_offset,
+            v: 0,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeVtHevc {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                crate::quartz::ffi::rustdesk_vt_hevc_destroy(self.handle);
+            }
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
+
+enum HwEncoderBackend {
+    Ffmpeg(Encoder),
+    #[cfg(target_os = "macos")]
+    NativeVt(NativeVtHevc),
+}
+
 pub struct HwRamEncoder {
-    encoder: Encoder,
+    encoder: HwEncoderBackend,
     pub format: DataFormat,
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
+    fps: u32,
+    applied_fps: u32,
+    last_reconfig: Option<std::time::Instant>,
     config: HwRamEncoderConfig,
 }
 
@@ -67,26 +221,14 @@ impl EncoderApi for HwRamEncoder {
     {
         match cfg {
             EncoderCfg::HWRAM(config) => {
-                let rc = Self::rate_control(&config);
-                let mut bitrate =
-                    Self::bitrate(&config.name, config.width, config.height, config.quality);
-                bitrate = Self::check_bitrate_range(&config, bitrate);
-                let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
-                let ctx = EncodeContext {
-                    name: config.name.clone(),
-                    mc_name: config.mc_name.clone(),
-                    width: config.width as _,
-                    height: config.height as _,
-                    pixfmt: DEFAULT_PIXFMT,
-                    align: HW_STRIDE_ALIGN as _,
-                    kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
-                    gop,
-                    quality: DEFAULT_HW_QUALITY,
-                    rc,
-                    q: -1,
-                    thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
+                let is_vt = cfg!(target_os = "macos") && config.name.contains("videotoolbox");
+                let fps = if is_vt {
+                    target_fps()
+                } else {
+                    DEFAULT_FPS as u32
                 };
+                let bitrate = Self::calc_bitrate_for_config(&config, config.quality, fps);
+                let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
                 let format = match Encoder::format_from_name(config.name.clone()) {
                     Ok(format) => format,
                     Err(_) => {
@@ -96,14 +238,56 @@ impl EncoderApi for HwRamEncoder {
                         )))
                     }
                 };
+                #[cfg(target_os = "macos")]
+                if config.name == "hevc_videotoolbox" {
+                    if let Some(vt) = NativeVtHevc::new(config.width, config.height, bitrate, fps, gop) {
+                        log::info!(
+                            "macOS native VTCompressionSession HEVC encoder started: {}x{}, fps={}, bitrate={} kbps (quality={:.2}, low_latency_rc={}, latency_free=true)",
+                            config.width,
+                            config.height,
+                            fps,
+                            bitrate,
+                            config.quality,
+                            vt.low_latency_rc
+                        );
+                        return Ok(HwRamEncoder {
+                            encoder: HwEncoderBackend::NativeVt(vt),
+                            format,
+                            pixfmt: DEFAULT_PIXFMT,
+                            bitrate,
+                            fps,
+                            applied_fps: fps,
+                            last_reconfig: None,
+                            config,
+                        });
+                    }
+                    log::warn!("macOS native VTCompressionSession HEVC unavailable, falling back to FFmpeg hwcodec");
+                }
+                let ctx = Self::build_encode_context(&config, bitrate, fps);
                 match Encoder::new(ctx.clone()) {
-                    Ok(encoder) => Ok(HwRamEncoder {
-                        encoder,
-                        format,
-                        pixfmt: ctx.pixfmt,
-                        bitrate,
-                        config,
-                    }),
+                    Ok(encoder) => {
+                        if is_vt {
+                            log::info!(
+                                "macOS FFmpeg videotoolbox encoder started: {} {}x{}, fps={}, bitrate={} kbps (quality={:.2}, rc=VBR)",
+                                config.name,
+                                config.width,
+                                config.height,
+                                fps,
+                                bitrate,
+                                config.quality
+                            );
+                        }
+                        Ok(HwRamEncoder {
+                            encoder: HwEncoderBackend::Ffmpeg(encoder),
+                            format,
+                            pixfmt: ctx.pixfmt,
+                            bitrate,
+                            fps,
+                            applied_fps: fps,
+                            last_reconfig: None,
+                            config,
+                        })
+                    }
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
             }
@@ -142,29 +326,34 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn yuvfmt(&self) -> crate::EncodeYuvFormat {
-        let pixfmt = if self.pixfmt == AVPixelFormat::AV_PIX_FMT_NV12 {
-            Pixfmt::NV12
-        } else {
-            Pixfmt::I420
-        };
-        let stride = self
-            .encoder
-            .linesize
-            .clone()
-            .drain(..)
-            .map(|i| i as usize)
-            .collect();
-        crate::EncodeYuvFormat {
-            pixfmt,
-            w: self.encoder.ctx.width as _,
-            h: self.encoder.ctx.height as _,
-            stride,
-            u: self.encoder.offset[0] as _,
-            v: if pixfmt == Pixfmt::NV12 {
-                0
-            } else {
-                self.encoder.offset[1] as _
-            },
+        match &self.encoder {
+            #[cfg(target_os = "macos")]
+            HwEncoderBackend::NativeVt(vt) => vt.yuvfmt(),
+            HwEncoderBackend::Ffmpeg(enc) => {
+                let pixfmt = if self.pixfmt == AVPixelFormat::AV_PIX_FMT_NV12 {
+                    Pixfmt::NV12
+                } else {
+                    Pixfmt::I420
+                };
+                let stride = enc
+                    .linesize
+                    .clone()
+                    .drain(..)
+                    .map(|i| i as usize)
+                    .collect();
+                crate::EncodeYuvFormat {
+                    pixfmt,
+                    w: enc.ctx.width as _,
+                    h: enc.ctx.height as _,
+                    stride,
+                    u: enc.offset[0] as _,
+                    v: if pixfmt == Pixfmt::NV12 {
+                        0
+                    } else {
+                        enc.offset[1] as _
+                    },
+                }
+            }
         }
     }
 
@@ -174,6 +363,11 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()> {
+        self.config.quality = ratio;
+        if cfg!(target_os = "macos") && self.config.name.contains("videotoolbox") {
+            self.maybe_reconfigure_videotoolbox("quality");
+            return Ok(());
+        }
         let mut bitrate = Self::bitrate(
             &self.config.name,
             self.config.width,
@@ -182,10 +376,29 @@ impl EncoderApi for HwRamEncoder {
         );
         if bitrate > 0 {
             bitrate = Self::check_bitrate_range(&self.config, bitrate);
-            self.encoder.set_bitrate(bitrate as _).ok();
+            if let HwEncoderBackend::Ffmpeg(enc) = &mut self.encoder {
+                enc.set_bitrate(bitrate as _).ok();
+            }
             self.bitrate = bitrate;
         }
-        self.config.quality = ratio;
+        Ok(())
+    }
+
+    fn set_fps(&mut self, fps: u32) -> ResultType<()> {
+        let clamped = fps.clamp(10, 120);
+        set_target_fps(clamped);
+        if cfg!(target_os = "macos") && self.config.name.contains("videotoolbox") {
+            self.fps = clamped;
+            self.maybe_reconfigure_videotoolbox("fps");
+        }
+        Ok(())
+    }
+
+    fn set_max_bitrate_kbs(&mut self, kbs: u32) -> ResultType<()> {
+        set_macos_h265_max_kbs(kbs);
+        if cfg!(target_os = "macos") && self.config.name.contains("videotoolbox") {
+            self.maybe_reconfigure_videotoolbox("max_bitrate");
+        }
         Ok(())
     }
 
@@ -198,6 +411,10 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn latency_free(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if matches!(self.encoder, HwEncoderBackend::NativeVt(_)) {
+            return true;
+        }
         ["mediacodec", "videotoolbox"]
             .iter()
             .all(|&x| !self.config.name.contains(x))
@@ -233,19 +450,147 @@ impl HwRamEncoder {
     }
 
     pub fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<EncodeFrame>> {
-        match self.encoder.encode(yuv, ms) {
-            Ok(v) => {
-                let mut data = Vec::<EncodeFrame>::new();
-                data.append(v);
-                Ok(data)
+        match &mut self.encoder {
+            #[cfg(target_os = "macos")]
+            HwEncoderBackend::NativeVt(vt) => vt.encode(yuv, ms),
+            HwEncoderBackend::Ffmpeg(enc) => match enc.encode(yuv, ms) {
+                Ok(v) => {
+                    let mut data = Vec::<EncodeFrame>::new();
+                    data.append(v);
+                    Ok(data)
+                }
+                Err(code) => Err(anyhow!("RAM encode failed: {}", code)),
+            },
+        }
+    }
+
+    fn build_encode_context(config: &HwRamEncoderConfig, bitrate: u32, fps: u32) -> EncodeContext {
+        let rc = Self::rate_control(config);
+        let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
+        EncodeContext {
+            name: config.name.clone(),
+            mc_name: config.mc_name.clone(),
+            width: config.width as _,
+            height: config.height as _,
+            pixfmt: DEFAULT_PIXFMT,
+            align: HW_STRIDE_ALIGN as _,
+            kbs: bitrate as i32,
+            fps: fps.clamp(10, 120) as i32,
+            gop,
+            quality: DEFAULT_HW_QUALITY,
+            rc,
+            q: -1,
+            thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
+        }
+    }
+
+    fn calc_bitrate_for_config(config: &HwRamEncoderConfig, ratio: f32, fps: u32) -> u32 {
+        let mut bitrate = Self::bitrate(&config.name, config.width, config.height, ratio);
+        #[cfg(target_os = "macos")]
+        if config.name.contains("videotoolbox") && bitrate > 0 {
+            // Smooth FPS bitrate compensation (baseline 30fps, gentle 0.45 exponent) so
+            // 60+ fps stays crisp without causing scene-change bufferbloat spikes.
+            let fps_scale = (fps.clamp(15, 120) as f32 / 30.0).powf(0.45);
+            bitrate = ((bitrate as f32) * fps_scale).round() as u32;
+        }
+        Self::check_bitrate_range(config, bitrate)
+    }
+
+    fn maybe_reconfigure_videotoolbox(&mut self, reason: &str) {
+        let new_bitrate = Self::calc_bitrate_for_config(&self.config, self.config.quality, self.fps);
+        if new_bitrate == 0 {
+            return;
+        }
+        let old_bitrate = self.bitrate.max(1);
+        let old_fps = self.applied_fps.max(1);
+
+        // Native Apple VTCompressionSession updates AverageBitRate, DataRateLimits, and
+        // ExpectedFrameRate live via VTSessionSetProperty with zero session recreation,
+        // zero IDR spike, and zero encode_fail!
+        #[cfg(target_os = "macos")]
+        if let HwEncoderBackend::NativeVt(vt) = &mut self.encoder {
+            if new_bitrate == old_bitrate && self.fps == old_fps {
+                return;
             }
-            Err(code) => Err(anyhow!("RAM encode failed: {}", code)),
+            vt.update(new_bitrate, self.fps);
+            if reason == "max_bitrate"
+                || new_bitrate.abs_diff(old_bitrate) * 20 >= old_bitrate
+                || self.fps.abs_diff(old_fps) >= 5
+            {
+                log::info!(
+                    "macOS native VT HEVC live-updated ({reason}): {}x{}, fps={}->{}, bitrate={}->{} kbps (quality={:.2})",
+                    self.config.width,
+                    self.config.height,
+                    old_fps,
+                    self.fps,
+                    old_bitrate,
+                    new_bitrate,
+                    self.config.quality
+                );
+            }
+            self.bitrate = new_bitrate;
+            self.applied_fps = self.fps;
+            return;
+        }
+
+        // Fallback FFmpeg hwcodec path: only rebuild on large changes with cooldown.
+        let bitrate_rel = new_bitrate.abs_diff(old_bitrate) as f32 / old_bitrate as f32;
+        let fps_diff = self.fps.abs_diff(old_fps);
+        let fps_rel = fps_diff as f32 / old_fps as f32;
+
+        let bitrate_changed = bitrate_rel >= 0.18;
+        let fps_changed = fps_diff >= 8 && fps_rel >= 0.18;
+        if !bitrate_changed && !fps_changed {
+            return;
+        }
+
+        let major_jump = new_bitrate >= old_bitrate.saturating_mul(2)
+            || old_bitrate >= new_bitrate.saturating_mul(2)
+            || self.fps >= old_fps.saturating_mul(2)
+            || old_fps >= self.fps.saturating_mul(2);
+        if !major_jump {
+            if let Some(last) = self.last_reconfig {
+                if last.elapsed() < std::time::Duration::from_millis(2500) {
+                    return;
+                }
+            }
+        }
+
+        let ctx = Self::build_encode_context(&self.config, new_bitrate, self.fps);
+        match Encoder::new(ctx) {
+            Ok(new_encoder) => {
+                self.encoder = HwEncoderBackend::Ffmpeg(new_encoder);
+                log::info!(
+                    "macOS FFmpeg videotoolbox reconfigured ({reason}): {}x{}, fps={}->{}, bitrate={}->{} kbps (quality={:.2})",
+                    self.config.width,
+                    self.config.height,
+                    old_fps,
+                    self.fps,
+                    old_bitrate,
+                    new_bitrate,
+                    self.config.quality
+                );
+                self.bitrate = new_bitrate;
+                self.applied_fps = self.fps;
+                self.last_reconfig = Some(std::time::Instant::now());
+            }
+            Err(_) => {
+                log::warn!(
+                    "macOS FFmpeg videotoolbox reconfigure ({reason}) failed for fps={}, bitrate={} kbps; keeping active encoder",
+                    self.fps,
+                    new_bitrate
+                );
+            }
         }
     }
 
     fn rate_control(_config: &HwRamEncoderConfig) -> RateControl {
         #[cfg(target_os = "android")]
         if _config.name.contains("mediacodec") {
+            return RC_VBR;
+        }
+        #[cfg(target_os = "macos")]
+        if _config.name.contains("videotoolbox") {
             return RC_VBR;
         }
         RC_CBR
@@ -301,6 +646,18 @@ impl HwRamEncoder {
                         }
                     }
                 }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if _config.name.contains("videotoolbox") {
+            let user_cap = macos_h265_max_kbs();
+            let max_kbs = if _config.width * _config.height <= 1920 * 1080 {
+                user_cap
+            } else {
+                user_cap.max(24_000).min(42_000)
+            };
+            if bitrate > max_kbs {
+                return max_kbs;
             }
         }
         bitrate

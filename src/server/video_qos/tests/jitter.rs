@@ -119,8 +119,8 @@ fn a_congested_viewer_does_not_lower_another_viewers_target() {
     // Viewer 2 is fine and keeps its own target rather than inheriting viewer 1's.
     qos.user_network_delay(2, 10);
     assert_eq!(qos.users[&2].delay.fps, Some(FPS));
-    // Once viewer 1 restores, the stream is back at once.
-    for _ in 0..3 {
+    // The stream returns to the cap as viewer 1 recovers.
+    for _ in 0..6 {
         qos.user_network_delay(1, 10);
     }
     assert_eq!(qos.fps(), FPS);

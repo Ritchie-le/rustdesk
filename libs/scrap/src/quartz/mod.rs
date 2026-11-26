@@ -1,8 +1,8 @@
 pub use self::capturer::Capturer;
 pub use self::config::Config;
-pub use self::display::Display;
+pub use self::display::{clear_target_resolutions, set_target_resolution, Display};
 pub use self::ffi::{CGError, PixelFormat};
-pub use self::frame::Frame;
+pub use self::frame::{Frame, RawSurface};
 
 mod capturer;
 mod config;

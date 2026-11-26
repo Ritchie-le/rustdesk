@@ -27,6 +27,49 @@ fn second(qos: &mut VideoQoS, delay: u32, dynamic: bool) {
 }
 
 #[test]
+fn user_quality_is_a_ceiling_not_a_starting_point() {
+    let mut qos = session(true);
+    // The viewer's stored "custom 1000" setting arrives as quality << 8.
+    qos.user_image_quality(1, 1000 << 8);
+    assert_eq!(qos.latest_quality(), Quality::Custom(20.0));
+    assert_eq!(
+        qos.ratio(),
+        BR_BALANCED,
+        "a high request must not start the encoder at its ceiling"
+    );
+    for _ in 0..30 {
+        second(&mut qos, 10, true);
+    }
+    let probed = qos.ratio();
+    assert!(
+        probed > BR_BALANCED,
+        "a healthy link is probed upward, got {probed}"
+    );
+    assert!(probed < 20.0, "probing stays far below the ceiling");
+    // A lower request applies at once: quality 25 => ratio 0.5.
+    qos.user_image_quality(1, 25 << 8);
+    assert_eq!(qos.ratio(), 0.5);
+}
+
+#[test]
+fn a_new_session_starts_from_the_conservative_ratio() {
+    let mut qos = session(true);
+    qos.user_image_quality(1, 1000 << 8);
+    for _ in 0..30 {
+        second(&mut qos, 10, true);
+    }
+    assert!(
+        qos.ratio() > BR_BALANCED,
+        "the previous session probed the link upward: {}",
+        qos.ratio()
+    );
+    // A departing viewer's entry can outlive its connection; the next session
+    // must not inherit the probed ratio of the previous one.
+    qos.on_connection_open(2);
+    assert_eq!(qos.ratio(), BR_BALANCED);
+}
+
+#[test]
 fn static_to_dynamic_ratio_recovery() {
     println!("Static recovery: 90 s healthy video, 12 s confirmed 800 ms delay, 60 s healthy static screen, then 90 s video. Bitrate is modeled as ratio * 6000 kbps.");
     println!("| restart profile | ratio after cut | ratio after static | time to 90% | time to 95% | final ratio | final FPS | modeled bitrate |");

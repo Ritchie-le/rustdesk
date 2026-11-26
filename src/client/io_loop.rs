@@ -830,7 +830,10 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(message::Union::Misc(misc)) => match misc.union {
                         Some(misc::Union::Option(ref option)) => {
                             if option.custom_fps > 0 {
-                                self.last_auto_fps = None;
+                                self.last_auto_fps =
+                                    super::fps_recovery::state_after_manual_fps_update(
+                                        self.last_auto_fps,
+                                    );
                             }
                         }
                         Some(misc::Union::RefreshVideo(_)) => {
@@ -1623,12 +1626,20 @@ impl<T: InvokeUiSession> Remote<T> {
             if auto_fps < 1 {
                 auto_fps = 1;
             }
+            // Prefer interactive motion over idle bandwidth savings. A genuine decode queue
+            // still lowers the cap immediately, but otherwise active video returns to 30 FPS
+            // before resuming gradual recovery toward the user's requested rate.
+            let auto_fps = super::fps_recovery::prioritize_active_fps(
+                auto_fps,
+                custom_fps as _,
+                should_decrease,
+            );
+            // A short decode-speed sample can overestimate sustained capacity.
+            let auto_fps =
+                super::fps_recovery::next_auto_fps(auto_fps, last_auto_fps, should_decrease);
             if Some(auto_fps) != last_auto_fps {
                 let mut misc = Misc::new();
-                misc.set_option(OptionMessage {
-                    custom_fps: auto_fps as _,
-                    ..Default::default()
-                });
+                misc.set_auto_adjust_fps(auto_fps as _);
                 let mut msg = Message::new();
                 msg.set_misc(misc);
                 // Send inline so a queued manual FPS update is applied after this decision.
@@ -3227,7 +3238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_fps_update_allows_the_same_automatic_limit_again() {
+    async fn manual_fps_update_preserves_the_automatic_limit_state() {
         let (mut remote, mut peer, mut far) = remote_and_peer().await;
         let (video_sender, _video_receiver) = std::sync::mpsc::channel();
         remote.video_threads.insert(
@@ -3242,26 +3253,30 @@ mod tests {
             },
         );
 
-        for (manual_fps, expected) in [(None, 20), (Some(90), 90), (None, 20)] {
-            if let Some(fps) = manual_fps {
-                let lc = &remote.handler.lc;
-                let msg = lc.write().unwrap().set_custom_fps(fps, false);
-                remote
-                    .handle_msg_from_ui(Data::Message(msg), &mut peer)
-                    .await;
-            } else {
-                remote
-                    .fps_control(true, HashMap::from([(0, 20)]), &mut peer)
-                    .await;
-            }
-            let bytes = timeout(1000, far.next())
-                .await
-                .expect("FPS update was not sent")
-                .unwrap()
-                .unwrap();
-            let msg = Message::parse_from_bytes(&bytes).unwrap();
-            assert_eq!(msg.misc().option().custom_fps, expected);
-        }
+        remote
+            .fps_control(true, HashMap::from([(0, 20)]), &mut peer)
+            .await;
+        let bytes = timeout(1000, far.next()).await.unwrap().unwrap().unwrap();
+        let msg = Message::parse_from_bytes(&bytes).unwrap();
+        assert_eq!(msg.misc().auto_adjust_fps(), 30);
+
+        let lc = &remote.handler.lc;
+        let msg = lc.write().unwrap().set_custom_fps(90, false);
+        remote
+            .handle_msg_from_ui(Data::Message(msg), &mut peer)
+            .await;
+        let bytes = timeout(1000, far.next()).await.unwrap().unwrap().unwrap();
+        let msg = Message::parse_from_bytes(&bytes).unwrap();
+        assert_eq!(msg.misc().option().custom_fps, 90);
+        assert_eq!(remote.last_auto_fps, Some(30));
+
+        remote
+            .fps_control(true, HashMap::from([(0, 20)]), &mut peer)
+            .await;
+        assert!(
+            timeout(100, far.next()).await.is_err(),
+            "the unchanged automatic limit was sent again"
+        );
     }
 }
 

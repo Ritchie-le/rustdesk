@@ -102,6 +102,7 @@ fn main() {
         #[cfg(target_os = "macos")]
         build_mac();
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
     if target_os == "android" {
         build_android_ifaddrs();
