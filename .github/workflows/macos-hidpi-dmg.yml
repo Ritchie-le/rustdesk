@@ -50,44 +50,16 @@ jobs:
           git checkout -B "${TARGET_BRANCH}"
           git add -A
           git status --short
-          git commit -m "feat(macos): ScreenCaptureKit NV12 capture + 2560x1440 HiDPI cap + steady FPS"
+          git commit -m "feat(macos): integer-divisor adaptive HiDPI capture + background cm window"
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${TARGET_BRANCH}"
           popd
 
-      - name: Cache generated Flutter 3.44 bridge
-        id: cache-frb-files
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
-        with:
-          path: |
-            work/src/bridge_generated.rs
-            work/src/bridge_generated.io.rs
-            work/flutter/lib/generated_bridge.dart
-            work/flutter/lib/generated_bridge.freezed.dart
-            work/flutter/macos/Runner/bridge_generated.h
-            work/flutter/ios/Runner/bridge_generated.h
-          key: frb-3.44-${{ hashFiles('work/src/flutter_ffi.rs') }}
-
       - name: Install bridge prerequisites
-        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y \
-            clang \
-            cmake \
-            curl \
-            gcc \
-            git \
-            g++ \
-            libclang-dev \
-            libgtk-3-dev \
-            llvm-dev \
-            nasm \
-            ninja-build \
-            pkg-config \
-            wget
+          sudo apt-get install -y             clang             cmake             curl             gcc             git             g++             libclang-dev             libgtk-3-dev             llvm-dev             nasm             ninja-build             pkg-config             wget
 
       - name: Install Rust toolchain for bridge
-        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.BRIDGE_RUST_VERSION }}
@@ -95,14 +67,11 @@ jobs:
           components: "rustfmt"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         with:
           workspaces: work
           prefix-key: bridge-ubuntu-22.04
-          save-if: true
 
       - name: Install Flutter for bridge
-        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: "stable"
@@ -110,7 +79,6 @@ jobs:
           cache: true
 
       - name: Generate flutter-rust-bridge (Flutter 3.44)
-        if: steps.cache-frb-files.outputs.cache-hit != 'true'
         working-directory: work
         shell: bash
         run: |
@@ -119,10 +87,7 @@ jobs:
           cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
           bash .github/patches/apply_flutter_3.44_source_patches.sh
           pushd flutter && flutter pub get && popd
-          ~/.cargo/bin/flutter_rust_bridge_codegen \
-            --rust-input ./src/flutter_ffi.rs \
-            --dart-output ./flutter/lib/generated_bridge.dart \
-            --c-output ./flutter/macos/Runner/bridge_generated.h
+          ~/.cargo/bin/flutter_rust_bridge_codegen             --rust-input ./src/flutter_ffi.rs             --dart-output ./flutter/lib/generated_bridge.dart             --c-output ./flutter/macos/Runner/bridge_generated.h
           cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
 
       - name: Upload bridge artifact
@@ -197,7 +162,6 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: macos-15-hidpi
-          save-if: true
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -237,38 +201,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, re
-          ver = "12.3"
-          for path, pat, repl in [
-              ("build.py", r"MACOSX_DEPLOYMENT_TARGET=[0-9]+\.[0-9]+", f"MACOSX_DEPLOYMENT_TARGET={ver}"),
-              ("flutter/macos/Podfile", r"platform :osx, '[^']*'", f"platform :osx, '{ver}'"),
-              ("Cargo.toml", r'osx_minimum_system_version = "[0-9]+\.[0-9]+"', f'osx_minimum_system_version = "{ver}"'),
-              ("flutter/macos/Runner.xcodeproj/project.pbxproj", r"MACOSX_DEPLOYMENT_TARGET = [0-9]+\.[0-9]+;", f"MACOSX_DEPLOYMENT_TARGET = {ver};"),
-          ]:
-              p = pathlib.Path(path)
-              p.write_text(re.sub(pat, repl, p.read_text(encoding="utf-8")), encoding="utf-8")
-          # Skip building iOS staticlib on macOS desktop build to cut link time
-          cargo_toml = pathlib.Path("Cargo.toml")
-          cargo_toml.write_text(
-              cargo_toml.read_text(encoding="utf-8").replace(
-                  'crate-type = ["cdylib", "staticlib", "rlib"]',
-                  'crate-type = ["cdylib", "rlib"]',
-              ),
-              encoding="utf-8",
-          )
-          PY
-          export MACOSX_DEPLOYMENT_TARGET="12.3"
-          echo "MACOSX_DEPLOYMENT_TARGET=12.3" >> "$GITHUB_ENV"
+          export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          MIN_MACOS_VERSION="12.3"
+          sed -i "s/MACOSX_DEPLOYMENT_TARGET=[0-9]*\.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/g" build.py
+          sed -i "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/g" flutter/macos/Podfile
+          sed -i "s/osx_minimum_system_version = "[0-9]*\.[0-9]*"/osx_minimum_system_version = "${MIN_MACOS_VERSION}"/g" Cargo.toml
+          sed -i "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*\.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/g" flutter/macos/Runner.xcodeproj/project.pbxproj
+          export MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS_VERSION}"
+          echo "MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}" >> "$GITHUB_ENV"
 
-          # Fast standalone unit tests (<1s) before release build
-          rustc --edition 2021 --test src/server/video_send.rs -o /tmp/test_video_send && /tmp/test_video_send
-          rustc --edition 2021 --test src/client/fps_recovery.rs -o /tmp/test_fps_recovery && /tmp/test_fps_recovery
+          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
 
+          # Run targeted unit tests for integer-divisor HiDPI adaptive capture, Retina mouse scaling, and steady-FPS QoS
           FEATURES="$(./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit --print-features)"
-          CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-            cargo build --locked --features "$FEATURES" --release --lib --bin service
-          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit --skip-cargo
+          cargo test --locked --release -p scrap hidpi_integer_divisor_adaptive_capture
+          cargo test --locked --release --lib --features "$FEATURES" retina_hidpi_tests
+          cargo test --locked --release --lib --features "$FEATURES" video_send::tests
+          cargo test --locked --release --lib --features "$FEATURES" fps_recovery::tests
 
       - name: Ad-hoc codesign RustDesk.app & package DMG
         shell: bash
@@ -322,14 +271,7 @@ jobs:
           sed -i 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/g' "$CREATE_DMG"
           DMG_NAME="rustdesk-1.5.3-aarch64-hidpi.dmg"
           rm -f "$DMG_NAME"
-          create-dmg \
-            --volname "RustDesk HiDPI Installer" \
-            --icon "RustDesk.app" 200 190 \
-            --hide-extension "RustDesk.app" \
-            --window-size 800 400 \
-            --app-drop-link 600 185 \
-            "$DMG_NAME" \
-            "$APP_PATH"
+          create-dmg             --volname "RustDesk HiDPI Installer"             --icon "RustDesk.app" 200 190             --hide-extension "RustDesk.app"             --window-size 800 400             --app-drop-link 600 185             "$DMG_NAME"             "$APP_PATH"
           ls -lh "$DMG_NAME"
           shasum -a 256 "$DMG_NAME"
 
@@ -345,7 +287,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ env.TARGET_BRANCH }}
-          name: "RustDesk 1.5.3 macOS HiDPI 2K (ScreenCaptureKit NV12 + Steady FPS)"
+          name: "RustDesk 1.5.3 macOS HiDPI Adaptive (Integer-Divisor SCK NV12 + Background CM)"
           prerelease: false
           files: |
             rustdesk-1.5.3-aarch64-hidpi.dmg
