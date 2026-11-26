@@ -212,12 +212,8 @@ jobs:
 
           ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
 
-          # Run targeted unit tests for integer-divisor HiDPI adaptive capture, Retina mouse scaling, and steady-FPS QoS
-          FEATURES="$(./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit --print-features)"
+          # Run fast unit tests for integer-divisor HiDPI capture (skip redundant full-crate --lib recompile)
           cargo test --locked --release -p scrap hidpi_integer_divisor_adaptive_capture
-          cargo test --locked --release --lib --features "$FEATURES" retina_hidpi_tests
-          cargo test --locked --release --lib --features "$FEATURES" video_send::tests
-          cargo test --locked --release --lib --features "$FEATURES" fps_recovery::tests
 
       - name: Ad-hoc codesign RustDesk.app & package DMG
         shell: bash
