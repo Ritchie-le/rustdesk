@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Release version label (e.g. v1.0)"
+        description: "Release version label (e.g. v1.1)"
         required: false
-        default: "v1.0"
+        default: "v1.1"
       rustdesk_ref:
         description: "Upstream rustdesk/rustdesk tag or commit"
         required: false
@@ -107,18 +107,26 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Extract, test, and build wg-socks.exe (user-space WireGuard)
+      - name: Extract, test, and build wg-socks.exe (dual-mode Wintun + SOCKS5)
         shell: bash
         run: |
           python3 winmod_repo/.github/winmod/apply_windows_wg_changes.py --extract-wg-socks wg_socks_build
           pushd wg_socks_build
-          go get golang.zx2c4.com/wireguard@latest
+          go get golang.zx2c4.com/wireguard@latest golang.zx2c4.com/wireguard/windows@latest
           go mod tidy
           go test -v ./...
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
             go build -trimpath -ldflags="-s -w -H=windowsgui" -o ../wg-socks.exe .
           popd
           ls -lh wg-socks.exe
+
+          # Download official Wintun 0.14.1 amd64 DLL with SHA256 verification
+          curl -fsSL -o wintun-0.14.1.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51 *wintun-0.14.1.zip" | sha256sum -c -
+          unzip -o wintun-0.14.1.zip "wintun/bin/amd64/wintun.dll" -d wintun_extract
+          cp wintun_extract/wintun/bin/amd64/wintun.dll ./wintun.dll
+          rm -rf wintun_extract wintun-0.14.1.zip
+          ls -lh wintun.dll
 
       - name: Checkout upstream RustDesk ${{ inputs.rustdesk_ref || '1.5.3' }}
         uses: actions/checkout@v4
@@ -226,6 +234,7 @@ jobs:
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           Move-Item -Path ./flutter/build/windows/x64/runner/Release -Destination ./rustdesk -Force
           Copy-Item -Path ..\wg-socks.exe -Destination ./rustdesk/wg-socks.exe -Force
+          Copy-Item -Path ..\wintun.dll -Destination ./rustdesk/wintun.dll -Force
 
           # Download usbmmidd_v2 virtual display helper (optional, matches official build)
           try {
@@ -255,7 +264,7 @@ jobs:
         working-directory: rustdesk_src
         shell: bash
         run: |
-          VER="${{ inputs.version_tag || 'v1.0' }}"
+          VER="${{ inputs.version_tag || 'v1.1' }}"
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
           pip3 install -r requirements.txt
@@ -284,27 +293,27 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}
+          name: RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.1' }}
           path: rustdesk_src/dist_out/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version_tag || 'v1.0' }}-win-wg
-          name: RustDesk Mod Windows x64 ${{ inputs.version_tag || 'v1.0' }} (Built-in WireGuard)
+          tag_name: ${{ inputs.version_tag || 'v1.1' }}-win-wg
+          name: RustDesk Mod Windows x64 ${{ inputs.version_tag || 'v1.1' }} (Dual-Mode WireGuard)
           body: |
-            ### Windows x64 Portable Client with Built-in User-Space WireGuard
+            ### Windows x64 Portable Client with Built-in Dual-Mode WireGuard
             Based on upstream RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}`.
 
             **Features:**
-            - Built-in user-space WireGuard (`wg-socks.exe`, `wireguard-go` + `gVisor netstack`) — zero admin privileges, zero virtual NIC driver, zero system routing table modifications.
-            - Supports both TCP (`21116`/`21117`/`21118`) and UDP (`21116`) via local authenticated SOCKS5 loopback proxy.
-            - Settings -> Network -> **内置 WireGuard 隧道**: paste or import standard `.conf`, toggle ON/OFF, auto-start on launch, zero orphan processes on exit.
+            - **Mode 1 — High-Performance Kernel NIC (Built-in Wintun `0.14.1`, recommended)**: Native WebRTC / UDP encrypted direct P2P with zero TCP-in-UDP head-of-line blocking! Routes only `AllowedIPs`, cleans up the virtual adapter automatically on RustDesk exit (one UAC prompt on start).
+            - **Mode 2 — Zero-Admin User-Space Fallback (SOCKS5 + `gVisor netstack`)**: Zero admin privileges, zero driver, zero system routing changes; tuned loopback TCP (`TCP_NODELAY`, 2MB buffers, 128KB copy) + auto-fallback if UAC is unavailable.
+            - Settings -> Network -> **内置 WireGuard 隧道**: switch mode, paste or import `.conf`, toggle ON/OFF, auto-start on launch.
             - Fixed Windows HiDPI resolution switching deadlock when controlling macOS Retina hosts.
 
             **Downloads:**
-            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}.exe` — single-file self-extracting portable executable (recommended)
-            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}-portable.zip` — unzipped portable folder
+            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.1' }}.exe` — single-file self-extracting portable executable (recommended)
+            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.1' }}-portable.zip` — unzipped portable folder
           files: |
             rustdesk_src/dist_out/RustDesk-Mod-Win-x64-*.exe
             rustdesk_src/dist_out/RustDesk-Mod-Win-x64-*-portable.zip
