@@ -1,4 +1,4 @@
-name: Build PoketDesk Windows x64 (Dual-Mode WireGuard)
+name: Build PocketDesk Windows x64 (Dual-Mode WireGuard)
 
 on:
   workflow_dispatch:
@@ -274,16 +274,16 @@ jobs:
           mkdir -p ./dist_out
           PACKER_EXE=$(find . -name "rustdesk-portable-packer.exe" | head -n 1)
           echo "Found portable packer: $PACKER_EXE"
-          cp "$PACKER_EXE" "./dist_out/PoketDesk-Win-x64-${VER}.exe"
+          cp "$PACKER_EXE" "./dist_out/PocketDesk-Win-x64-${VER}.exe"
           python3 -c "
           import os, zipfile
-          out = './dist_out/PoketDesk-Win-x64-${VER}-portable.zip'
+          out = './dist_out/PocketDesk-Win-x64-${VER}-portable.zip'
           with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
               for root, _, files in os.walk('./rustdesk'):
                   for fn in files:
                       full = os.path.join(root, fn)
                       arc = os.path.relpath(full, './rustdesk')
-                      zf.write(full, os.path.join('PoketDesk-Win-x64-${VER}', arc))
+                      zf.write(full, os.path.join('PocketDesk-Win-x64-${VER}', arc))
           print('Created', out)
           "
           ls -lh ./dist_out/
@@ -293,20 +293,20 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PoketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}
+          name: PocketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}
           path: rustdesk_src/dist_out/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version_tag || 'v2.0' }}-poketdesk
-          name: PoketDesk Windows x64 ${{ inputs.version_tag || 'v2.0' }}
+          tag_name: ${{ inputs.version_tag || 'v2.0' }}-pocketdesk
+          name: PocketDesk Windows x64 ${{ inputs.version_tag || 'v2.0' }}
           body: |
-            ### PoketDesk ${{ inputs.version_tag || 'v2.0' }} — Custom Apple/Linear Dual-Theme Remote Desktop + Dual-Mode WireGuard
+            ### PocketDesk ${{ inputs.version_tag || 'v2.0' }} — Custom Apple/Linear Dual-Theme Remote Desktop + Dual-Mode WireGuard
             Built on untouched RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}` core engine.
 
             **Highlights:**
-            - **Brand-new `PoketDesk` Apple / Linear / Raycast Dual-Theme GUI & Custom Icon**: Frosted rounded cards, Spotlight remote connect bar, modern Indigo-Cobalt & Cyan palette, crisp light & dark themes.
+            - **Brand-new `PocketDesk` Apple / Linear / Raycast Dual-Theme GUI & Custom Icon**: Frosted rounded cards, Spotlight remote connect bar, modern Indigo-Cobalt & Cyan palette, crisp light & dark themes.
             - **Zero-UAC On-Demand WireGuard Service (`RustDeskWgHelper`)**: 1-click install/uninstall inside Settings -> Network; launches Wintun silently with zero UAC prompt and 0 idle RAM/CPU when closed.
             - **Multi-Profile Switching + Hideable Live Status Bar**: Switch between split-tunnel & full-tunnel `.conf` profiles with live handshake age, RTT, packet loss, and tx/rx traffic.
             - **Windows System Tray 1-Click WireGuard Toggle**: Start/stop tunnel directly from the tray menu; stays active when minimized to tray for browser/SMB/SSH.
@@ -314,9 +314,9 @@ jobs:
             - **Windows HiDPI Resolution Switching Fix** (instant `1920x1080` / `Original` switching on macOS Retina peers).
 
             **Downloads:**
-            - `PoketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}.exe` — single-file portable executable (recommended)
-            - `PoketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}-portable.zip` — unzipped portable folder
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}.exe` — single-file portable executable (recommended)
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v2.0' }}-portable.zip` — unzipped portable folder
           files: |
-            rustdesk_src/dist_out/PoketDesk-Win-x64-*.exe
-            rustdesk_src/dist_out/PoketDesk-Win-x64-*-portable.zip
+            rustdesk_src/dist_out/PocketDesk-Win-x64-*.exe
+            rustdesk_src/dist_out/PocketDesk-Win-x64-*-portable.zip
             rustdesk_src/dist_out/SHA256SUMS.txt
