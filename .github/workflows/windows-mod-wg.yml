@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Release version label (e.g. v3.1)"
+        description: "Release version label (e.g. v3.3)"
         required: false
-        default: "v3.1"
+        default: "v3.3"
       rustdesk_ref:
         description: "Upstream rustdesk/rustdesk tag or commit"
         required: false
@@ -136,7 +136,17 @@ jobs:
           submodules: recursive
           path: rustdesk_src
 
-      - name: Apply Windows Embedded WireGuard & Resolution Fix patches
+      - name: Vendor webrtc-util (49c89bd) for IP_UNICAST_IF P2P bypass
+        shell: bash
+        working-directory: rustdesk_src
+        run: |
+          git clone --no-checkout --filter=blob:none https://github.com/rustdesk-org/webrtc.git /tmp/webrtc_vendor
+          git -C /tmp/webrtc_vendor checkout 49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63 -- util
+          rm -rf libs/webrtc-util
+          cp -R /tmp/webrtc_vendor/util libs/webrtc-util
+          rm -rf /tmp/webrtc_vendor
+
+      - name: Apply PocketDesk v3.3 Universal Self-Adaptive P2P, WireGuard & GUI patches
         shell: bash
         working-directory: rustdesk_src
         run: |
@@ -231,6 +241,7 @@ jobs:
         working-directory: rustdesk_src
         shell: pwsh
         run: |
+          cargo update -p webrtc-util
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           Move-Item -Path ./flutter/build/windows/x64/runner/Release -Destination ./rustdesk -Force
           Copy-Item -Path ..\wg-socks.exe -Destination ./rustdesk/wg-socks.exe -Force
@@ -264,7 +275,7 @@ jobs:
         working-directory: rustdesk_src
         shell: bash
         run: |
-          VER="${{ inputs.version_tag || 'v3.1' }}"
+          VER="${{ inputs.version_tag || 'v3.3' }}"
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
           pip3 install -r requirements.txt
@@ -293,28 +304,31 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}
+          name: PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.3' }}
           path: rustdesk_src/dist_out/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version_tag || 'v3.1' }}-pocketdesk
-          name: PocketDesk Windows x64 ${{ inputs.version_tag || 'v3.1' }}
+          tag_name: ${{ inputs.version_tag || 'v3.3' }}-pocketdesk
+          name: PocketDesk Windows x64 ${{ inputs.version_tag || 'v3.3' }}
           body: |
-            ### PocketDesk ${{ inputs.version_tag || 'v3.1' }} — True Minimize-to-Tray + Isolated PocketDesk Tray + Redesigned Floating Ball + Unified Network Mode
-            Built on untouched RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}` core engine.
+            ### PocketDesk ${{ inputs.version_tag || 'v3.3' }} — Universal Self-Adaptive NAT Traversal (All 7 Upgrades) + WireGuard Auto-Heal + Zero-UAC + Full GUI Parity
+            Built on RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}` with PocketDesk Universal Self-Adaptive P2P & Transport Engine (zero hardcoded IPs/NIC names).
 
-            **New in v3.1:**
-            - **True Minimize/Close to Tray (Windows & macOS)**: Closing the main window (`✕`) or clicking topbar `托盘` smoothly hides PocketDesk to system tray while keeping built-in WireGuard alive.
-            - **Isolated PocketDesk Windows Tray (`Local\PocketDesk_tray`)**: Never collides with or jumps back to legacy RustDesk; always shows PocketDesk's own icon, wakes your running PocketDesk window instantly, includes 1-click WireGuard toggle & clean Quit.
-            - **Completely Redesigned Remote Floating Ball & Rounded Toolbar**: Frosted dark glass floating ball with gradient `P` orb, auto-dimming, 1-click Network HUD toggle, fullscreen & disconnect.
-            - **Split Delay Display in Top Network HUD**: Clearly separates end-to-end session delay (`画面 XXms`) and WireGuard tunnel ICMP RTT (`隧道 XXms`) with probe IP tooltip.
-            - **Unified 3-Mode Connection Switcher + Quick-Add Favorite Card**: Merge 9-digit ID server and Direct IP modes cleanly, and save any IP or 9-digit ID with custom alias from the Spotlight bar.
+            **New in v3.3:**
+            - **Upgrade 1 — Fake-IP (`198.18.0.0/15`) Conditional DNS Bypass**: Zero overhead on normal networks; races physical-NIC UDP `:53` queries to DHCP gateway + Global (`1.1.1.1`/`8.8.8.8`) + Domestic (`223.5.5.5`/`119.29.29.29`) DNS whenever a TUN proxy poisons DNS.
+            - **Upgrade 2 — Gateway-Aware Multi-OS Physical NIC Discovery & Round-Robin**: Kernel FIB / `FirstGatewayAddress` / `/proc/net/route` discovery across Ethernet, Wi-Fi, 5G WWAN & USB/TB docks with Round-Robin and automatic `hbbs` heartbeat failover.
+            - **Upgrade 3 — Smart Dual-Stack IPv6 (`IPV6_UNICAST_IF` / `IPV6_BOUND_IF`) + Split-VPN Coexistence**: Enables `Udp6` only when physical Global Unicast IPv6 (`2000::/3`) exists (eliminating 5s IPv4-only stalls); preserves corporate VPN / Tailscale P2P `host` candidates while forcing `srflx` STUN strictly over physical NICs.
+            - **Upgrade 4 — Cross-Process `is_privacy_proxy()`**: Identifies built-in `wg-socks` via synced `wg_` username across GUI, `--cm`, and `--server`.
+            - **Upgrade 5 — Adaptive Multi-Egress Startup Pre-Warm**: Probes 3 ephemeral physical sockets on boot to register all Dual-WAN / ECMP NAT-pool egress IPs cleanly.
+            - **Upgrade 6 — Event-Driven `tokio::select!` Trickle ICE (`0 ms` queue delay) + RTT-Adaptive Relay Fallback (`clamp(4*rtt+600ms, 1100ms, 2500ms)`)**.
+            - **Upgrade 7 — Geo- & Port-Diverse STUN (`:3478` + `:443` + `:19302` + self-hosted `:3478`) + `600 ms` Refresh Cooldown + Hardware/Direct Adaptive `30 FPS` Start**.
+            - **WireGuard Idle-Drop Immunity & One-Time UAC Forever + 100% macOS/Windows GUI Parity**.
 
             **Downloads:**
-            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}.exe` — single-file portable executable (recommended)
-            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}-portable.zip` — unzipped portable folder
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.3' }}.exe` — single-file portable executable (recommended)
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.3' }}-portable.zip` — unzipped portable folder
           files: |
             rustdesk_src/dist_out/PocketDesk-Win-x64-*.exe
             rustdesk_src/dist_out/PocketDesk-Win-x64-*-portable.zip
