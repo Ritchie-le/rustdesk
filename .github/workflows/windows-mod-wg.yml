@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Release version label (e.g. v3.0)"
+        description: "Release version label (e.g. v3.1)"
         required: false
-        default: "v3.0"
+        default: "v3.1"
       rustdesk_ref:
         description: "Upstream rustdesk/rustdesk tag or commit"
         required: false
@@ -264,7 +264,7 @@ jobs:
         working-directory: rustdesk_src
         shell: bash
         run: |
-          VER="${{ inputs.version_tag || 'v3.0' }}"
+          VER="${{ inputs.version_tag || 'v3.1' }}"
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
           pip3 install -r requirements.txt
@@ -293,29 +293,28 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.0' }}
+          name: PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}
           path: rustdesk_src/dist_out/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version_tag || 'v3.0' }}-pocketdesk
-          name: PocketDesk Windows x64 ${{ inputs.version_tag || 'v3.0' }}
+          tag_name: ${{ inputs.version_tag || 'v3.1' }}-pocketdesk
+          name: PocketDesk Windows x64 ${{ inputs.version_tag || 'v3.1' }}
           body: |
-            ### PocketDesk ${{ inputs.version_tag || 'v3.0' }} — Radical Apple/Linear Dual-Theme GUI + Dual-Mode WireGuard
+            ### PocketDesk ${{ inputs.version_tag || 'v3.1' }} — True Minimize-to-Tray + Isolated PocketDesk Tray + Redesigned Floating Ball + Unified Network Mode
             Built on untouched RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}` core engine.
 
-            **Highlights:**
-            - **Brand-new `PocketDesk v3.0` Radical GUI & Custom Icon**: 64px slim icon rail, topbar ID/password pill, Raycast Spotlight quick-connect bar, Bento device cards, dedicated WireGuard Tunnel Studio page, and macOS Sequoia two-column Settings with visual 3-card theme selector.
-            - **Zero-UAC On-Demand WireGuard Service (`RustDeskWgHelper`)**: 1-click install/uninstall inside Tunnel Studio; launches Wintun silently with zero UAC prompt and 0 idle RAM/CPU when closed.
-            - **Multi-Profile Switching + Hideable Live Status Bar**: Switch between split-tunnel & full-tunnel `.conf` profiles with live handshake age, RTT, packet loss, and tx/rx traffic.
-            - **Windows System Tray 1-Click WireGuard Toggle**: Start/stop tunnel directly from the tray menu; stays active when minimized to tray for browser/SMB/SSH.
-            - **Collapsible Top Network HUD (Replaces legacy Quality Monitor)** + **Auto-dimming Frosted Floating Pill** with 1-click HUD toggle.
-            - **Windows HiDPI Resolution Switching Fix** (instant `1920x1080` / `Original` switching on macOS Retina peers).
+            **New in v3.1:**
+            - **True Minimize/Close to Tray (Windows & macOS)**: Closing the main window (`✕`) or clicking topbar `托盘` smoothly hides PocketDesk to system tray while keeping built-in WireGuard alive.
+            - **Isolated PocketDesk Windows Tray (`Local\PocketDesk_tray`)**: Never collides with or jumps back to legacy RustDesk; always shows PocketDesk's own icon, wakes your running PocketDesk window instantly, includes 1-click WireGuard toggle & clean Quit.
+            - **Completely Redesigned Remote Floating Ball & Rounded Toolbar**: Frosted dark glass floating ball with gradient `P` orb, auto-dimming, 1-click Network HUD toggle, fullscreen & disconnect.
+            - **Split Delay Display in Top Network HUD**: Clearly separates end-to-end session delay (`画面 XXms`) and WireGuard tunnel ICMP RTT (`隧道 XXms`) with probe IP tooltip.
+            - **Unified 3-Mode Connection Switcher + Quick-Add Favorite Card**: Merge 9-digit ID server and Direct IP modes cleanly, and save any IP or 9-digit ID with custom alias from the Spotlight bar.
 
             **Downloads:**
-            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.0' }}.exe` — single-file portable executable (recommended)
-            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.0' }}-portable.zip` — unzipped portable folder
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}.exe` — single-file portable executable (recommended)
+            - `PocketDesk-Win-x64-${{ inputs.version_tag || 'v3.1' }}-portable.zip` — unzipped portable folder
           files: |
             rustdesk_src/dist_out/PocketDesk-Win-x64-*.exe
             rustdesk_src/dist_out/PocketDesk-Win-x64-*-portable.zip
