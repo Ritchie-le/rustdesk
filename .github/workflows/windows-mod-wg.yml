@@ -1,0 +1,303 @@
+name: Build Windows x64 Mod (Embedded WireGuard)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Release version label (e.g. v1.0)"
+        required: false
+        default: "v1.0"
+      rustdesk_ref:
+        description: "Upstream rustdesk/rustdesk tag or commit"
+        required: false
+        default: "1.5.3"
+
+permissions:
+  contents: write
+
+env:
+  RUST_VERSION: "1.75"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  FLUTTER_BRIDGE_VERSION: "3.22.3"
+  FLUTTER_VERSION: "3.24.5"
+  LLVM_VERSION: "15.0.6"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  generate_bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout upstream RustDesk ${{ inputs.rustdesk_ref || '1.5.3' }}
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ inputs.rustdesk_ref || '1.5.3' }}
+          submodules: recursive
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake curl gcc git g++ libclang-dev libgtk-3-dev \
+            llvm-dev nasm ninja-build pkg-config wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: winmod-bridge-ubuntu-22.04
+
+      - name: Install Flutter ${{ env.FLUTTER_BRIDGE_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_BRIDGE_VERSION }}
+          cache: true
+
+      - name: Generate flutter_rust_bridge bindings
+        shell: bash
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          pushd flutter && flutter pub get && popd
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+            ./flutter/macos/Runner/bridge_generated.h
+            ./flutter/ios/Runner/bridge_generated.h
+
+  build_windows_x64:
+    needs: generate_bridge
+    runs-on: windows-2022
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout mod scripts (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: winmod_repo
+
+      - name: Setup Go 1.24 for wg-socks.exe
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Extract, test, and build wg-socks.exe (user-space WireGuard)
+        shell: bash
+        run: |
+          python3 winmod_repo/.github/winmod/apply_windows_wg_changes.py --extract-wg-socks wg_socks_build
+          pushd wg_socks_build
+          go get golang.zx2c4.com/wireguard@latest
+          go mod tidy
+          go test -v ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -H=windowsgui" -o ../wg-socks.exe .
+          popd
+          ls -lh wg-socks.exe
+
+      - name: Checkout upstream RustDesk ${{ inputs.rustdesk_ref || '1.5.3' }}
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ inputs.rustdesk_ref || '1.5.3' }}
+          submodules: recursive
+          path: rustdesk_src
+
+      - name: Apply Windows Embedded WireGuard & Resolution Fix patches
+        shell: bash
+        working-directory: rustdesk_src
+        run: |
+          python3 ../winmod_repo/.github/winmod/apply_windows_wg_changes.py
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: rustdesk_src
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter ${{ env.FLUTTER_VERSION }}
+        id: flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Replace engine with RustDesk custom Flutter engine
+        working-directory: rustdesk_src
+        shell: pwsh
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          $flutterRoot = "${{ steps.flutter.outputs['CACHE-PATH'] }}"
+          $engineTarget = Join-Path $flutterRoot "bin\cache\artifacts\engine\windows-x64-release"
+          Write-Host "Custom engine target: $engineTarget"
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release -Force
+          Copy-Item -Path "windows-x64-release\*" -Destination $engineTarget -Recurse -Force
+
+      - name: Patch Flutter dropdown filter
+        working-directory: rustdesk_src
+        shell: bash
+        run: |
+          FLUTTER_DIR=$(dirname $(dirname $(which flutter)))
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$FLUTTER_DIR/"
+          pushd "$FLUTTER_DIR"
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          popd
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rustdesk_src -> target
+          prefix-key: winmod-windows-2022
+
+      - name: Setup vcpkg with GitHub Actions binary cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        working-directory: rustdesk_src
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        shell: bash
+        run: |
+          if ! "$VCPKG_ROOT/vcpkg" install \
+            --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+            done
+            exit 1
+          fi
+
+      - name: Build RustDesk Windows x64 + bundle wg-socks.exe
+        working-directory: rustdesk_src
+        shell: pwsh
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          Move-Item -Path ./flutter/build/windows/x64/runner/Release -Destination ./rustdesk -Force
+          Copy-Item -Path ..\wg-socks.exe -Destination ./rustdesk/wg-socks.exe -Force
+
+          # Download usbmmidd_v2 virtual display helper (optional, matches official build)
+          try {
+            Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+            Expand-Archive usbmmidd_v2.zip -DestinationPath . -Force
+            Remove-Item -Path usbmmidd_v2\Win32 -Recurse -ErrorAction SilentlyContinue
+            Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat" -ErrorAction SilentlyContinue
+            Move-Item -Path .\usbmmidd_v2 -Destination ./rustdesk -Force
+          } catch {
+            Write-Host "Skipping optional usbmmidd_v2: $_"
+          }
+
+          Get-ChildItem ./rustdesk
+
+      - name: Find Runner.res
+        working-directory: rustdesk_src
+        continue-on-error: true
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res" | head -n 1)
+          if [ -n "$runner_res" ]; then
+            echo "Runner.res: $runner_res"
+            cp "$runner_res" ./libs/portable/Runner.res
+          fi
+
+      - name: Pack single-file portable .exe and portable .zip
+        working-directory: rustdesk_src
+        shell: bash
+        run: |
+          VER="${{ inputs.version_tag || 'v1.0' }}"
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          popd
+
+          mkdir -p ./dist_out
+          cp ./target/release/rustdesk-portable-packer.exe "./dist_out/RustDesk-Mod-Win-x64-${VER}.exe"
+          python3 -c "
+          import os, zipfile
+          out = './dist_out/RustDesk-Mod-Win-x64-${VER}-portable.zip'
+          with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
+              for root, _, files in os.walk('./rustdesk'):
+                  for fn in files:
+                      full = os.path.join(root, fn)
+                      arc = os.path.relpath(full, './rustdesk')
+                      zf.write(full, os.path.join('RustDesk-Mod-Win-x64-${VER}', arc))
+          print('Created', out)
+          "
+          ls -lh ./dist_out/
+          sha256sum ./dist_out/* > "./dist_out/SHA256SUMS.txt"
+          cat "./dist_out/SHA256SUMS.txt"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}
+          path: rustdesk_src/dist_out/*
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version_tag || 'v1.0' }}-win-wg
+          name: RustDesk Mod Windows x64 ${{ inputs.version_tag || 'v1.0' }} (Built-in WireGuard)
+          body: |
+            ### Windows x64 Portable Client with Built-in User-Space WireGuard
+            Based on upstream RustDesk `${{ inputs.rustdesk_ref || '1.5.3' }}`.
+
+            **Features:**
+            - Built-in user-space WireGuard (`wg-socks.exe`, `wireguard-go` + `gVisor netstack`) — zero admin privileges, zero virtual NIC driver, zero system routing table modifications.
+            - Supports both TCP (`21116`/`21117`/`21118`) and UDP (`21116`) via local authenticated SOCKS5 loopback proxy.
+            - Settings -> Network -> **内置 WireGuard 隧道**: paste or import standard `.conf`, toggle ON/OFF, auto-start on launch, zero orphan processes on exit.
+            - Fixed Windows HiDPI resolution switching deadlock when controlling macOS Retina hosts.
+
+            **Downloads:**
+            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}.exe` — single-file self-extracting portable executable (recommended)
+            - `RustDesk-Mod-Win-x64-${{ inputs.version_tag || 'v1.0' }}-portable.zip` — unzipped portable folder
+          files: |
+            rustdesk_src/dist_out/RustDesk-Mod-Win-x64-*.exe
+            rustdesk_src/dist_out/RustDesk-Mod-Win-x64-*-portable.zip
+            rustdesk_src/dist_out/SHA256SUMS.txt
