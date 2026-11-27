@@ -155,16 +155,18 @@ jobs:
 
       - name: Replace engine with RustDesk custom Flutter engine
         working-directory: rustdesk_src
-        shell: pwsh
+        shell: bash
         run: |
           flutter doctor -v
           flutter precache --windows
-          $flutterRoot = "${{ steps.flutter.outputs['CACHE-PATH'] }}"
-          $engineTarget = Join-Path $flutterRoot "bin\cache\artifacts\engine\windows-x64-release"
-          Write-Host "Custom engine target: $engineTarget"
-          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
-          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release -Force
-          Copy-Item -Path "windows-x64-release\*" -Destination $engineTarget -Recurse -Force
+          FLUTTER_DIR=$(dirname $(dirname $(which flutter)))
+          ENGINE_TARGET="$FLUTTER_DIR/bin/cache/artifacts/engine/windows-x64-release"
+          echo "Custom engine target: $ENGINE_TARGET"
+          ls -la "$ENGINE_TARGET"
+          curl -fsSL -o windows-x64-release.zip https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip
+          unzip -o windows-x64-release.zip -d windows-x64-release
+          cp -rf windows-x64-release/* "$ENGINE_TARGET/"
+          rm -rf windows-x64-release windows-x64-release.zip
 
       - name: Patch Flutter dropdown filter
         working-directory: rustdesk_src
@@ -173,7 +175,11 @@ jobs:
           FLUTTER_DIR=$(dirname $(dirname $(which flutter)))
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$FLUTTER_DIR/"
           pushd "$FLUTTER_DIR"
-          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          if git apply --reverse --check flutter_3.24.4_dropdown_menu_enableFilter.diff 2>/dev/null; then
+            echo "Flutter dropdown patch already applied"
+          else
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
           popd
 
       - name: Install Rust toolchain
@@ -257,7 +263,9 @@ jobs:
           popd
 
           mkdir -p ./dist_out
-          cp ./target/release/rustdesk-portable-packer.exe "./dist_out/RustDesk-Mod-Win-x64-${VER}.exe"
+          PACKER_EXE=$(find . -name "rustdesk-portable-packer.exe" | head -n 1)
+          echo "Found portable packer: $PACKER_EXE"
+          cp "$PACKER_EXE" "./dist_out/RustDesk-Mod-Win-x64-${VER}.exe"
           python3 -c "
           import os, zipfile
           out = './dist_out/RustDesk-Mod-Win-x64-${VER}-portable.zip'
