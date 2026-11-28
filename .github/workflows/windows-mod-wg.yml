@@ -140,11 +140,14 @@ jobs:
         shell: bash
         working-directory: rustdesk_src
         run: |
-          git clone --no-checkout --filter=blob:none https://github.com/rustdesk-org/webrtc.git /tmp/webrtc_vendor
-          git -C /tmp/webrtc_vendor checkout 49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63 -- util
-          rm -rf libs/webrtc-util
-          cp -R /tmp/webrtc_vendor/util libs/webrtc-util
-          rm -rf /tmp/webrtc_vendor
+          REV="49c89bd8d30e6e62e4c1a96cee38fdc11f79ef63"
+          curl -fsSL -o webrtc_vendor.tar.gz "https://github.com/rustdesk-org/webrtc/archive/${REV}.tar.gz"
+          rm -rf webrtc_vendor libs/webrtc-util
+          mkdir -p webrtc_vendor
+          tar -xzf webrtc_vendor.tar.gz -C webrtc_vendor
+          cp -R "webrtc_vendor/webrtc-${REV}/util" libs/webrtc-util
+          rm -rf webrtc_vendor webrtc_vendor.tar.gz
+          ls -la libs/webrtc-util/src/vnet/net.rs
 
       - name: Apply PocketDesk v3.3 Universal Self-Adaptive P2P, WireGuard & GUI patches
         shell: bash
